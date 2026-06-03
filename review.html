@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Review Change — Gerrit AI Reviewer</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* Side-by-side diff */
+    .diff-split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 8px 8px;
+      overflow: hidden;
+      margin-bottom: 24px;
+      font-family: 'Cascadia Code','Fira Code','Consolas',monospace;
+      font-size: 13px;
+      background: var(--code-bg);
+    }
+    .split-pane { overflow-x: auto; }
+    .split-pane + .split-pane { border-left: 2px solid var(--border); }
+    .split-pane-header {
+      padding: 6px 12px;
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+    }
+    .split-table { width: 100%; border-collapse: collapse; }
+    .split-table td { padding: 2px 8px; white-space: pre; }
+    .split-table .line-no {
+      color: var(--muted); text-align: right; user-select: none;
+      min-width: 36px; border-right: 1px solid var(--border);
+      padding-right: 10px;
+    }
+    .split-table .diff-add { background: rgba(61,220,132,0.08); }
+    .split-table .diff-add td { color: #a8f0c6; }
+    .split-table .diff-add .line-no { color: var(--green); }
+    .split-table .diff-del { background: rgba(255,95,87,0.08); }
+    .split-table .diff-del td { color: #ffb0ab; }
+    .split-table .diff-del .line-no { color: var(--red); }
+    .split-table .diff-ctx td { color: var(--muted); }
+    .split-table .diff-empty td { color: transparent; background: rgba(0,0,0,0.15); }
+    .split-table .diff-empty .line-no { color: transparent; }
+
+    /* View toggle */
+    .view-toggle { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .view-toggle button {
+      padding: 6px 14px; font-size: 12px; font-weight: 600;
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .view-toggle button.active { background: var(--accent); color: white; }
+
+    /* Per-file review button in sidebar */
+    .file-item { position: relative; }
+    .file-review-btn {
+      opacity: 0;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 2px 7px;
+      font-size: 11px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: opacity 0.15s;
+    }
+    .file-item:hover .file-review-btn { opacity: 1; }
+    .file-review-btn.running { opacity: 1; background: var(--accent2); }
+
+    /* Per-file result badge on sidebar item */
+    .file-result-badge {
+      font-size: 11px;
+      border-radius: 10px;
+      padding: 1px 7px;
+      flex-shrink: 0;
+    }
+
+    /* Review panel tabs */
+    .panel-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+    .panel-tab {
+      padding: 5px 14px; border-radius: 20px; font-size: 12px; font-weight: 600;
+      cursor: pointer; border: 1px solid var(--border); background: var(--bg3); color: var(--muted);
+      transition: all 0.15s;
+    }
+    .panel-tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+
+    /* Score widget */
+    .score-widget {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 20px;
+      margin-bottom: 18px;
+    }
+    .score-dial {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -1px;
+      min-width: 56px;
+      text-align: center;
+      line-height: 1;
+    }
+    .score-accepted { color: var(--green); }
+    .score-moderate { color: var(--yellow); }
+    .score-rejected { color: var(--red); }
+    .score-info { display: flex; flex-direction: column; gap: 3px; }
+    .score-verdict {
+      font-size: 14px;
+      font-weight: 700;
+    }
+    .score-breakdown {
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .score-bar-wrap {
+      flex: 1;
+      height: 8px;
+      background: var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+      min-width: 80px;
+    }
+    .score-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.35s ease, background 0.35s ease;
+    }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-brand">
+    <span>🤖</span> Gerrit AI Code Reviewer
+  </div>
+  <div class="topnav-right">
+    <a href="commits.html" class="btn btn-ghost">← Back to Commits</a>
+    <span class="user-badge" id="userBadge">…</span>
+  </div>
+</nav>
+
+<div class="review-layout">
+
+  <!-- LEFT: File sidebar -->
+  <div class="file-sidebar">
+    <div class="sidebar-header">
+      <h3>Changed Files</h3>
+      <p id="fileCount">Loading…</p>
+    </div>
+    <div id="fileList">
+      <div class="loading" style="padding:20px;text-align:center">
+        <div class="spinner"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Main content -->
+  <div class="review-main" id="reviewMain">
+
+    <!-- Sticky top bar -->
+    <div class="review-topbar">
+      <div class="commit-info">
+        <h3 id="commitSubject">Loading…</h3>
+        <p id="commitMeta"></p>
+      </div>
+      <div class="review-actions">
+        <!-- View toggle -->
+        <div class="view-toggle" id="viewToggle">
+          <button class="active" onclick="setView('unified', this)" title="Unified diff">Unified</button>
+          <button onclick="setView('split', this)" title="Side-by-side diff">⬛ Side by Side</button>
+        </div>
+        <!-- Full commit review -->
+        <button class="btn btn-primary" id="aiReviewBtn" onclick="startAiReview('all')">
+          🤖 Review Commit
+        </button>
+        <button class="btn btn-success" id="postBtn" onclick="postComments()" style="display:none">
+          📬 Post Selected
+        </button>
+      </div>
+    </div>
+
+    <!-- Diff area -->
+    <div class="diff-container" id="diffContainer">
+      <div class="empty-state">
+        <div class="icon">📄</div>
+        <p>Select a file from the sidebar to view its diff</p>
+      </div>
+    </div>
+
+    <!-- AI Review panel -->
+    <div class="ai-panel" id="aiPanel" style="display:none">
+        <div class="ai-panel-header">
+          <h3>🤖 AI Review Results</h3>
+          <div id="reviewSummary"></div>
+        </div>
+
+        <!-- Score widget -->
+        <div class="score-widget" id="scoreWidget" style="display:none">
+          <div class="score-dial" id="scoreDial">100</div>
+          <div class="score-info">
+            <div class="score-verdict" id="scoreVerdict"></div>
+            <div class="score-breakdown" id="scoreBreakdown"></div>
+          </div>
+          <div class="score-bar-wrap">
+            <div class="score-bar-fill" id="scoreBarFill"></div>
+          </div>
+        </div>
+
+      <!-- Tabs: All / per-file -->
+      <div class="panel-tabs" id="panelTabs"></div>
+
+      <div class="review-comments" id="reviewComments"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-ghost" onclick="selectAll(true)">Select All</button>
+        <button class="btn btn-ghost" onclick="selectAll(false)">Deselect All</button>
+        <button class="btn btn-success" onclick="postComments()">📬 Post Selected to Gerrit</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<script>
+const PROXY = 'http://localhost:7474/api';
+let currentFile = null;
+let diffMode = 'unified';  // 'unified' | 'split'
+let allDiffs = {};
+let fileStats = {};
+
+// Review store: keyed by scope ('all' or filename)
+let reviewStore = {};   // scope → [comments]
+
+// Which tab is active in the panel
+let activeTab = 'all';
+
+function getAuth() {
+  const a = sessionStorage.getItem('auth');
+  if (!a) { window.location.href = 'index.html'; return null; }
+  return a;
+}
+
+const changeId  = sessionStorage.getItem('current_change_id');
+const changeNum = sessionStorage.getItem('current_change_num');
+const project   = sessionStorage.getItem('current_project');
+const subject   = sessionStorage.getItem('current_subject');
+
+function showToast(msg, type='success') {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span>${type==='success'?'✅':'❌'}</span> ${msg}`;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 5000);
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function escAttr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+// ── Init ──────────────────────────────────────────────────────
+async function init() {
+  if (!changeId) { window.location.href = 'changes.html'; return; }
+  document.getElementById('userBadge').textContent = sessionStorage.getItem('display_name') || '?';
+  document.getElementById('commitSubject').textContent = subject || 'Change #' + changeNum;
+  document.getElementById('commitMeta').textContent = `Project: ${project} · Change #${changeNum}`;
+  await loadFiles(getAuth());
+}
+
+// ── View toggle ───────────────────────────────────────────────
+function setView(mode, btn) {
+  diffMode = mode;
+  document.querySelectorAll('#viewToggle button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (currentFile) loadDiff(currentFile); // re-render current diff
+}
+
+// ── Load file list ────────────────────────────────────────────
+async function loadFiles(auth) {
+  try {
+    const url = `${PROXY}/a/changes/${changeNum}/revisions/current/files`;
+    const r = await fetch(url, { headers: { Authorization: auth } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+
+    const files = Object.entries(data)
+      .filter(([f]) => f !== '/COMMIT_MSG')
+      .map(([f, meta]) => ({ name: f, added: meta.lines_inserted||0, deleted: meta.lines_deleted||0 }));
+
+    fileStats = Object.fromEntries(files.map(f => [f.name, { added: f.added, deleted: f.deleted }]));
+    document.getElementById('fileCount').textContent = `${files.length} file${files.length!==1?'s':''} changed`;
+    renderFileList(files);
+  } catch (err) {
+    document.getElementById('fileList').innerHTML = `<div class="empty-state"><p>Error: ${err.message}</p></div>`;
+  }
+}
+
+function renderFileList(files) {
+  const list = document.getElementById('fileList');
+  list.innerHTML = files.map(f => `
+    <div class="file-item" id="fi-${safeId(f.name)}" onclick="loadDiff('${escAttr(f.name)}')">
+      <span>📄</span>
+      <span class="file-name" title="${escHtml(f.name)}">${escHtml(shortName(f.name))}</span>
+      <span class="file-stats">
+        <span class="ins">+${f.added}</span> <span class="del">-${f.deleted}</span>
+      </span>
+      <button class="file-review-btn" id="frb-${safeId(f.name)}"
+        onclick="event.stopPropagation(); startAiReview('${escAttr(f.name)}')"
+        title="AI Review this file">🤖</button>
+      <span class="file-result-badge" id="frr-${safeId(f.name)}"></span>
+    </div>`).join('');
+}
+
+function safeId(s) { return btoa(unescape(encodeURIComponent(s))).replace(/[^a-zA-Z0-9]/g,''); }
+function shortName(p) {
+  const parts = p.split('/');
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : p;
+}
+
+// ── Load + render diff ────────────────────────────────────────
+async function loadDiff(filename) {
+  const auth = getAuth();
+  currentFile = filename;
+
+  document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
+  const el = document.getElementById('fi-' + safeId(filename));
+  if (el) el.classList.add('active');
+
+  const container = document.getElementById('diffContainer');
+  container.innerHTML = `<div class="loading"><div class="spinner"></div><p style="margin-top:12px;color:var(--muted)">Loading diff…</p></div>`;
+
+  try {
+    if (!allDiffs[filename]) {
+      const encodedFile = encodeURIComponent(filename);
+      const url = `${PROXY}/a/changes/${changeNum}/revisions/current/files/${encodedFile}/diff?intraline=true`;
+      const r = await fetch(url, { headers: { Authorization: auth } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      allDiffs[filename] = await r.json();
+    }
+
+    if (diffMode === 'split') {
+      renderDiffSplit(filename, allDiffs[filename], container);
+    } else {
+      renderDiffUnified(filename, allDiffs[filename], container);
+    }
+  } catch (err) {
+    container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diff: ${err.message}</p></div>`;
+  }
+}
+
+// ── Unified diff ──────────────────────────────────────────────
+function renderDiffUnified(filename, diff, container) {
+  const content = diff.content || [];
+  if (!content.length) {
+    container.innerHTML = `<div class="empty-state"><div class="icon">📄</div><p>No diff content.</p></div>`;
+    return;
+  }
+  let oldLine = 1, newLine = 1, rows = '';
+  for (const chunk of content) {
+    if (chunk.ab) {
+      for (const line of chunk.ab) {
+        rows += `<tr class="diff-ctx">
+          <td class="line-no">${oldLine++}</td><td class="line-no">${newLine++}</td>
+          <td class="diff-marker"> </td><td>${escHtml(line)}</td></tr>`;
+      }
+    }
+    if (chunk.a) {
+      for (const line of chunk.a) {
+        rows += `<tr class="diff-del">
+          <td class="line-no">${oldLine++}</td><td class="line-no"></td>
+          <td class="diff-marker">−</td><td>${escHtml(line)}</td></tr>`;
+      }
+    }
+    if (chunk.b) {
+      for (const line of chunk.b) {
+        rows += `<tr class="diff-add">
+          <td class="line-no"></td><td class="line-no">${newLine++}</td>
+          <td class="diff-marker">+</td><td>${escHtml(line)}</td></tr>`;
+      }
+    }
+  }
+  container.innerHTML = `
+    <div class="diff-file-header">📄 ${escHtml(filename)}</div>
+    <table class="diff-table"><tbody>${rows}</tbody></table>`;
+}
+
+// ── Side-by-side diff ─────────────────────────────────────────
+function renderDiffSplit(filename, diff, container) {
+  const content = diff.content || [];
+  if (!content.length) {
+    container.innerHTML = `<div class="empty-state"><div class="icon">📄</div><p>No diff content.</p></div>`;
+    return;
+  }
+
+  // Build left (old) and right (new) row arrays
+  let leftRows = '', rightRows = '';
+  let oldLine = 1, newLine = 1;
+
+  for (const chunk of content) {
+    if (chunk.ab) {
+      for (const line of chunk.ab) {
+        leftRows  += `<tr class="diff-ctx"><td class="line-no">${oldLine++}</td><td>${escHtml(line)}</td></tr>`;
+        rightRows += `<tr class="diff-ctx"><td class="line-no">${newLine++}</td><td>${escHtml(line)}</td></tr>`;
+      }
+    }
+
+    // Pair up deletions and additions
+    const dels = chunk.a || [];
+    const adds = chunk.b || [];
+    const maxLen = Math.max(dels.length, adds.length);
+    for (let i = 0; i < maxLen; i++) {
+      if (i < dels.length) {
+        leftRows  += `<tr class="diff-del"><td class="line-no">${oldLine++}</td><td>${escHtml(dels[i])}</td></tr>`;
+      } else {
+        leftRows  += `<tr class="diff-empty"><td class="line-no"> </td><td> </td></tr>`;
+      }
+      if (i < adds.length) {
+        rightRows += `<tr class="diff-add"><td class="line-no">${newLine++}</td><td>${escHtml(adds[i])}</td></tr>`;
+      } else {
+        rightRows += `<tr class="diff-empty"><td class="line-no"> </td><td> </td></tr>`;
+      }
+    }
+  }
+
+  container.innerHTML = `
+    <div class="diff-file-header">📄 ${escHtml(filename)}</div>
+    <div class="diff-split">
+      <div class="split-pane">
+        <div class="split-pane-header">Before (old)</div>
+        <table class="split-table"><tbody>${leftRows}</tbody></table>
+      </div>
+      <div class="split-pane">
+        <div class="split-pane-header">After (new)</div>
+        <table class="split-table"><tbody>${rightRows}</tbody></table>
+      </div>
+    </div>`;
+}
+
+// ── AI Review (full commit or single file) ────────────────────
+async function startAiReview(scope) {
+  const auth = getAuth();
+  const isFile = scope !== 'all';
+
+  // Update button state
+  if (isFile) {
+    const btn = document.getElementById('frb-' + safeId(scope));
+    if (btn) { btn.classList.add('running'); btn.textContent = '⏳'; btn.disabled = true; }
+  } else {
+    const btn = document.getElementById('aiReviewBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Reviewing…';
+  }
+
+  try {
+    let diffText = '';
+
+    if (isFile) {
+      // Ensure we have this file's diff
+      if (!allDiffs[scope]) await loadDiff(scope);
+      diffText = buildUnifiedDiffForFile(scope, allDiffs[scope]);
+    } else {
+      // Full commit: try raw patch first
+      const patchUrl = `${PROXY}/a/changes/${changeNum}/revisions/current/patch`;
+      const pr = await fetch(patchUrl, { headers: { Authorization: auth } });
+      if (pr.ok) {
+        const raw = await pr.text();
+        try { diffText = atob(raw.trim().replace(/\s+/g, '')); }
+        catch { diffText = raw; }
+      }
+      if (!diffText) {
+        // Fallback: collect individual diffs
+        for (const f of Object.keys(fileStats)) {
+          if (!allDiffs[f]) {
+            const enc = encodeURIComponent(f);
+            try {
+              const r = await fetch(`${PROXY}/a/changes/${changeNum}/revisions/current/files/${enc}/diff?intraline=true`, { headers: { Authorization: auth } });
+              if (r.ok) allDiffs[f] = await r.json();
+            } catch {}
+          }
+        }
+        diffText = Object.entries(allDiffs).map(([f, d]) => buildUnifiedDiffForFile(f, d)).join('\n');
+      }
+    }
+
+    // Use a scope-specific key for polling
+    const pollKey = isFile ? `file_${changeNum}_${safeId(scope)}` : `all_${changeNum}`;
+
+    const resp = await fetch(`/ai-review/start/${pollKey}`, {
+      method: 'POST',
+      headers: { Authorization: auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ diff: diffText, files: isFile ? [scope] : Object.keys(fileStats), project_slug: sessionStorage.getItem('current_project_slug') || '' })
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    pollReview(pollKey, scope, isFile);
+
+  } catch (err) {
+    resetBtn(scope, isFile);
+    showToast('AI review failed: ' + err.message, 'error');
+  }
+}
+
+function buildUnifiedDiffForFile(filename, diff) {
+  let out = `--- a/${filename}\n+++ b/${filename}\n`;
+  for (const chunk of (diff.content || [])) {
+    if (chunk.ab) { for (const l of chunk.ab) out += ` ${l}\n`; }
+    if (chunk.a)  { for (const l of chunk.a)  out += `-${l}\n`; }
+    if (chunk.b)  { for (const l of chunk.b)  out += `+${l}\n`; }
+  }
+  return out;
+}
+
+async function pollReview(pollKey, scope, isFile) {
+  const start = Date.now();
+  const poll = async () => {
+    try {
+      const r = await fetch(`/ai-review/status/${pollKey}`);
+      const data = await r.json();
+
+      if (data.status === 'done') {
+        resetBtn(scope, isFile);
+        const result = data.result || {};
+        const comments = result.comments || data.result || [];
+        const tokenSummary = result.token_summary;
+
+        // Log token usage to console
+        if (tokenSummary) {
+          const hit = tokenSummary.cache_hit;
+          const cacheIcon  = hit ? '✅' : '❌';
+          const cacheLabel = hit
+            ? `CACHE HIT  (hash=${tokenSummary.prompt_hash}, ×${tokenSummary.cache_hit_count} before)`
+            : `CACHE MISS (hash=${tokenSummary.prompt_hash}, first time)`;
+          const strategyMap = {'skill-ref':'🧠 Skill ref (low tokens)', 'inline-compressed':'📄 Inline compressed', 'none':'⚪ No rules'};
+          const strategyLabel = strategyMap[tokenSummary.rules_strategy] || tokenSummary.rules_strategy;
+          console.group('%c🤖 AI Review — Token Usage', 'color:#7c3aed;font-weight:bold;font-size:13px');
+          console.log(`${cacheIcon} Cache        : ${cacheLabel}`);
+          console.log(`📋 Rules mode  : ${strategyLabel}`);
+          console.log(`📥 Input  tokens : ${tokenSummary.input_tokens.toLocaleString()}`);
+          console.log(`📤 Output tokens : ${tokenSummary.output_tokens.toLocaleString()}`);
+          console.log(`🔢 Total  tokens : ${tokenSummary.total_tokens.toLocaleString()}`);
+          console.log(`💰 Est. cost     : $${tokenSummary.estimated_cost_usd.toFixed(6)} USD  (${hit ? 'cache read' : 'full'} rate)`);
+          console.groupEnd();
+        }
+
+        reviewStore[scope] = comments;
+
+        // Update file badge in sidebar
+        if (isFile) {
+          const badge = document.getElementById('frr-' + safeId(scope));
+          if (badge) {
+            const hasError = comments.some(c => c.severity === 'error');
+            const hasWarn  = comments.some(c => c.severity === 'warning');
+            badge.className = `file-result-badge badge ${hasError ? 'badge-error' : hasWarn ? 'badge-warning' : 'badge-info'}`;
+            badge.textContent = comments.length ? `${comments.length}` : '✓';
+          }
+        }
+
+        renderPanelTabs();
+        setActiveTab(scope);
+        showToast(`${isFile ? shortName(scope) : 'Commit'} review: ${comments.length} issue${comments.length!==1?'s':''} found.`);
+      } else if (data.status === 'error') {
+        resetBtn(scope, isFile);
+        showToast('Review encountered an error. Check server logs.', 'error');
+      } else if (Date.now() - start > 120000) {
+        resetBtn(scope, isFile);
+        showToast('Review timed out.', 'error');
+      } else {
+        setTimeout(poll, 2000);
+      }
+    } catch { setTimeout(poll, 3000); }
+  };
+  setTimeout(poll, 2000);
+}
+
+function resetBtn(scope, isFile) {
+  if (isFile) {
+    const btn = document.getElementById('frb-' + safeId(scope));
+    if (btn) { btn.classList.remove('running'); btn.textContent = '🤖'; btn.disabled = false; }
+  } else {
+    const btn = document.getElementById('aiReviewBtn');
+    btn.disabled = false;
+    btn.innerHTML = '🤖 Review Commit';
+  }
+}
+
+// ── Panel tabs ────────────────────────────────────────────────
+function renderPanelTabs() {
+  const tabs = document.getElementById('panelTabs');
+  const scopes = Object.keys(reviewStore);
+  if (!scopes.length) return;
+
+  tabs.innerHTML = scopes.map(s => {
+    const label = s === 'all' ? '📋 Full Commit' : `📄 ${shortName(s)}`;
+    const count = (reviewStore[s]||[]).length;
+    return `<div class="panel-tab ${s === activeTab ? 'active' : ''}" onclick="setActiveTab('${escAttr(s)}')">${label} <span style="opacity:0.7">(${count})</span></div>`;
+  }).join('');
+}
+
+function setActiveTab(scope) {
+  activeTab = scope;
+  renderPanelTabs();
+  renderReviewComments(reviewStore[scope] || []);
+}
+
+// ── Render review comments ────────────────────────────────────
+function renderReviewComments(comments) {
+  const panel = document.getElementById('aiPanel');
+  const container = document.getElementById('reviewComments');
+  const summary = document.getElementById('reviewSummary');
+  document.getElementById('postBtn').style.display = '';
+
+  if (!comments.length) {
+    panel.style.display = '';
+    container.innerHTML = `<div class="empty-state" style="padding:20px"><div class="icon">✅</div><p>No issues found!</p></div>`;
+    return;
+  }
+
+  const counts = { error: 0, warning: 0, suggestion: 0 };
+  comments.forEach(c => counts[c.severity] = (counts[c.severity]||0) + 1);
+  summary.innerHTML = `
+    ${counts.error    ? `<span class="badge badge-error">${counts.error} error${counts.error>1?'s':''}</span> ` : ''}
+    ${counts.warning  ? `<span class="badge badge-warning">${counts.warning} warning${counts.warning>1?'s':''}</span> ` : ''}
+    ${counts.suggestion ? `<span class="badge badge-suggestion">${counts.suggestion} suggestion${counts.suggestion>1?'s':''}</span>` : ''}`;
+
+  const icons = { error: '🔴', warning: '🟡', suggestion: '🔵' };
+  container.innerHTML = comments.map((c, i) => `
+    <div class="review-comment selected" id="comment-${i}">
+      <input type="checkbox" id="chk-${i}" checked onchange="updateSelected(${i})">
+      <div class="comment-body">
+        <div class="comment-severity" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span class="badge badge-${c.severity}">${icons[c.severity]||'🔵'} ${c.severity.toUpperCase()}</span>
+          <button class="edit-comment-btn" id="edit-btn-${i}" onclick="editComment(${i})" title="Edit comment before posting"
+            style="background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer;">✏️ Edit</button>
+        </div>
+        <div class="comment-location">📄 ${escHtml(c.file)}${c.line ? ` · line ${c.line}` : ''}</div>
+        <div class="comment-text" id="comment-text-${i}">${escHtml(c.comment)}</div>
+      </div>
+    </div>`).join('');
+
+  panel.style.display = '';
+  panel.scrollIntoView({ behavior: 'smooth' });
+  calcScore();
+}
+
+// ── Edit comment inline ───────────────────────────────────────
+function editComment(i) {
+  const comments = reviewStore[activeTab] || [];
+  const c = comments[i];
+  if (!c) return;
+
+  const textDiv = document.getElementById('comment-text-' + i);
+  const editBtn = document.getElementById('edit-btn-' + i);
+
+  // Already in edit mode? Save it
+  if (editBtn.dataset.editing === '1') {
+    saveComment(i);
+    return;
+  }
+
+  // Switch to edit mode
+  editBtn.dataset.editing = '1';
+  editBtn.innerHTML = '💾 Save';
+  editBtn.style.background = 'var(--accent)';
+  editBtn.style.color = 'white';
+  editBtn.style.borderColor = 'var(--accent)';
+
+  textDiv.innerHTML = `<textarea id="edit-ta-${i}" rows="4"
+    style="width:100%;box-sizing:border-box;background:var(--bg2);color:var(--fg);border:1px solid var(--accent);border-radius:6px;padding:8px;font-size:13px;font-family:inherit;resize:vertical;"
+    onfocus="this.style.outline='2px solid var(--accent)'"
+    onblur="this.style.outline='none'"
+  >${escHtml(c.comment)}</textarea>`;
+  document.getElementById('edit-ta-' + i).focus();
+}
+
+function saveComment(i) {
+  const ta = document.getElementById('edit-ta-' + i);
+  if (!ta) return;
+  const newText = ta.value.trim();
+
+  // Persist back to reviewStore
+  const comments = reviewStore[activeTab] || [];
+  if (comments[i]) comments[i].comment = newText;
+
+  // Restore read mode
+  const textDiv = document.getElementById('comment-text-' + i);
+  textDiv.innerHTML = escHtml(newText);
+
+  const editBtn = document.getElementById('edit-btn-' + i);
+  editBtn.dataset.editing = '0';
+  editBtn.innerHTML = '✏️ Edit';
+  editBtn.style.background = 'var(--bg3)';
+  editBtn.style.color = 'var(--muted)';
+  editBtn.style.borderColor = 'var(--border)';
+}
+
+// ── Benchmark score ───────────────────────────────────────────
+const DEDUCTIONS = { error: 15, warning: 7, suggestion: 2 };
+
+function calcScore() {
+  const comments = reviewStore[activeTab] || [];
+  if (!comments.length) return;
+
+  let score = 100;
+  let errors = 0, warnings = 0, suggestions = 0;
+
+  comments.forEach((c, i) => {
+    const chk = document.getElementById('chk-' + i);
+    if (!chk || !chk.checked) return;   // unchecked = not counted
+    const d = DEDUCTIONS[c.severity] || 0;
+    score -= d;
+    if (c.severity === 'error')      errors++;
+    else if (c.severity === 'warning')  warnings++;
+    else                                suggestions++;
+  });
+
+  score = Math.max(0, score);
+
+  // Any checked error = auto rejected regardless of score
+  let verdict, cls, barColor;
+  if (errors > 0) {
+    score = 0;
+    verdict = '🔴 Rejected';       cls = 'score-rejected'; barColor = 'var(--red)';
+  } else if (score >= 80) {
+    verdict = '✅ Accepted';       cls = 'score-accepted'; barColor = 'var(--green)';
+  } else if (score >= 50) {
+    verdict = '🟡 Moderate';       cls = 'score-moderate'; barColor = 'var(--yellow)';
+  } else {
+    verdict = '🔴 Rejected';       cls = 'score-rejected'; barColor = 'var(--red)';
+  }
+
+  const parts = [];
+  if (errors)      parts.push(`${errors} error${errors>1?'s':''} ×${DEDUCTIONS.error}pts`);
+  if (warnings)    parts.push(`${warnings} warning${warnings>1?'s':''} ×${DEDUCTIONS.warning}pts`);
+  if (suggestions) parts.push(`${suggestions} suggestion${suggestions>1?'s':''} ×${DEDUCTIONS.suggestion}pts`);
+  const breakdown = parts.length ? `Deductions: ${parts.join(', ')}` : 'No active issues';
+
+  document.getElementById('scoreWidget').style.display = '';
+  const dial = document.getElementById('scoreDial');
+  dial.textContent = score;
+  dial.className = `score-dial ${cls}`;
+  document.getElementById('scoreVerdict').textContent = verdict;
+  document.getElementById('scoreVerdict').className = `score-verdict ${cls}`;
+  document.getElementById('scoreBreakdown').textContent = breakdown;
+  const fill = document.getElementById('scoreBarFill');
+  fill.style.width = score + '%';
+  fill.style.background = barColor;
+}
+
+function selectAll(state) {
+  const comments = reviewStore[activeTab] || [];
+  comments.forEach((_, i) => {
+    const chk = document.getElementById('chk-' + i);
+    if (chk) chk.checked = state;
+    const card = document.getElementById('comment-' + i);
+    if (card) card.classList.toggle('selected', state);
+  });
+  calcScore();
+}
+
+function updateSelected(i) {
+  const chk = document.getElementById('chk-' + i);
+  const card = document.getElementById('comment-' + i);
+  if (card) card.classList.toggle('selected', chk.checked);
+  calcScore();
+}
+
+// ── Post comments to Gerrit ───────────────────────────────────
+async function postComments() {
+  const auth = getAuth();
+  const comments = reviewStore[activeTab] || [];
+  const selected = comments.filter((_, i) => {
+    const chk = document.getElementById('chk-' + i);
+    return chk && chk.checked;
+  });
+
+  if (!selected.length) { showToast('No comments selected.', 'error'); return; }
+
+  const commentsByFile = {};
+  for (const c of selected) {
+    const file = c.file === 'general' ? '/COMMIT_MSG' : c.file;
+    if (!commentsByFile[file]) commentsByFile[file] = [];
+    commentsByFile[file].push({
+      line: c.line || undefined,
+      message: `[${c.severity.toUpperCase()}] ${c.comment}`,
+      side: 'REVISION'
+    });
+  }
+
+  const label = activeTab === 'all' ? 'Full Commit' : shortName(activeTab);
+  const payload = {
+    message: `AI Code Review (${label}): Found ${selected.length} issue${selected.length!==1?'s':''}.`,
+    comments: commentsByFile
+  };
+
+  try {
+    const url = `${PROXY}/a/changes/${changeNum}/revisions/current/review`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (r.ok) {
+      showToast(`✅ Posted ${selected.length} comment${selected.length!==1?'s':''} to Gerrit!`);
+      document.getElementById('postBtn').style.display = 'none';
+    } else {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || `HTTP ${r.status}`);
+    }
+  } catch (err) {
+    showToast('Failed to post: ' + err.message, 'error');
+  }
+}
+
+init();
+
+
+</script>
+</body>
+</html>

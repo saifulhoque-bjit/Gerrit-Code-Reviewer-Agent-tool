@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Commits — Gerrit AI Reviewer</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* ── Rules toolbar ──────────────────────────────── */
+    .rules-toolbar {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .rules-toolbar-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .rules-files-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex: 1;
+      min-width: 0;
+    }
+    .rules-file-chip {
+      background: rgba(61,220,132,0.1);
+      border: 1px solid rgba(61,220,132,0.3);
+      color: var(--green);
+      border-radius: 20px;
+      padding: 3px 10px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .rules-empty-hint {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    #rulesFileInput { display: none; }
+    .btn-rules-browse {
+      background: var(--bg3);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .btn-rules-browse:hover { background: rgba(79,142,247,0.1); }
+    .btn-rules-load {
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 18px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity 0.15s;
+    }
+    .btn-rules-load:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-rules-load:not(:disabled):hover { opacity: 0.88; }
+    .btn-rules-clear {
+      background: rgba(255,95,87,0.12);
+      border: 1px solid rgba(255,95,87,0.4);
+      color: var(--red);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-rules-clear:hover { background: rgba(255,95,87,0.2); }
+    .rules-status-badge {
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .rules-active   { background: rgba(61,220,132,0.15); color: var(--green); }
+    .rules-inactive { background: rgba(136,146,164,0.12); color: var(--muted); }
+    /* Skill generation progress bar */
+    .skill-progress-wrap {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+      width: 100%;
+    }
+    .skill-progress-wrap.visible { display: flex; }
+    .skill-progress-bar-outer {
+      flex: 1;
+      height: 6px;
+      background: var(--bg3);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .skill-progress-bar-inner {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent), #a78bfa);
+      border-radius: 4px;
+      transition: width 0.4s ease;
+      animation: skillPulse 1.4s ease-in-out infinite;
+    }
+    @keyframes skillPulse {
+      0%,100% { opacity: 1; }
+      50%      { opacity: 0.55; }
+    }
+    .skill-progress-label {
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .skill-ready-badge {
+      font-size: 11px;
+      padding: 2px 9px;
+      border-radius: 10px;
+      font-weight: 600;
+      background: rgba(167,139,250,0.15);
+      color: #a78bfa;
+      display: none;
+    }
+    .skill-ready-badge.visible { display: inline-block; }
+
+    /* ── Commits list ───────────────────────────────── */
+    .commits-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .commit-list { display: flex; flex-direction: column; gap: 8px; }
+    .commit-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 18px;
+      cursor: pointer;
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      align-items: center;
+      gap: 16px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .commit-card:hover { background: var(--bg3); border-color: var(--accent); }
+    .commit-subject { font-size: 14px; font-weight: 500; }
+    .commit-meta    { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .commit-num     { font-size: 12px; color: var(--muted); font-family: monospace; }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-brand">
+    <span>🤖</span> Gerrit AI Code Reviewer
+  </div>
+  <div class="topnav-right">
+    <a href="projects.html" class="btn btn-ghost">← Projects</a>
+    <span class="user-badge" id="userBadge">…</span>
+    <button class="btn btn-ghost" onclick="logout()">Sign Out</button>
+  </div>
+</nav>
+
+<div class="page">
+
+  <!-- Project title -->
+  <div class="page-header">
+    <h2 id="projectTitle">Loading…</h2>
+    <p id="projectSub"></p>
+  </div>
+
+  <!-- Rules toolbar -->
+  <div class="rules-toolbar" id="rulesToolbar">
+    <span class="rules-toolbar-label">📜 Review Rules:</span>
+
+    <!-- Loaded rules chips OR hint -->
+    <div class="rules-files-list" id="rulesFilesList">
+      <span class="rules-empty-hint">No rules loaded — reviewer uses default analysis</span>
+    </div>
+
+    <!-- Status badge -->
+    <span class="rules-status-badge rules-inactive" id="rulesStatusBadge">⚪ No Rules</span>
+
+    <!-- Hidden file input -->
+    <input type="file" id="rulesFileInput" multiple accept=".txt,.md,.text" onchange="onFilesSelected(this)">
+
+    <!-- Browse button -->
+    <button class="btn-rules-browse" onclick="document.getElementById('rulesFileInput').click()">
+      📂 Browse Files
+    </button>
+
+    <!-- Load Rules button — disabled until files selected -->
+    <button class="btn-rules-load" id="loadRulesBtn" disabled onclick="loadRules()">
+      ⬆️ Load Rules
+    </button>
+
+    <!-- Clear button — shown only when rules are loaded -->
+    <button class="btn-rules-clear" id="clearRulesBtn" style="display:none" onclick="clearRules()">
+      🗑 Clear Rules
+    </button>
+
+    <!-- Skill generation progress -->
+    <div class="skill-progress-wrap" id="skillProgressWrap" style="width:100%">
+      <span class="skill-progress-label">🧠 Generating skill…</span>
+      <div class="skill-progress-bar-outer">
+        <div class="skill-progress-bar-inner" id="skillProgressBar"></div>
+      </div>
+    </div>
+    <span class="skill-ready-badge" id="skillReadyBadge">🧠 Skill Ready</span>
+  </div>
+
+  <!-- Search + commit count -->
+  <div class="commits-header">
+    <input class="search-bar" id="searchBar" type="text"
+      placeholder="🔍 Search commits…" oninput="filterCommits()" style="margin:0">
+    <span id="commitCount" style="font-size:13px;color:var(--muted)"></span>
+  </div>
+
+  <!-- Commits list -->
+  <div id="commitsContainer">
+    <div class="loading">
+      <div class="spinner"></div>
+      <p style="margin-top:12px;color:var(--muted)">Loading commits…</p>
+    </div>
+  </div>
+</div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<script>
+const PROXY = 'http://localhost:7474/api';
+let allCommits = [];
+let pendingFiles = [];   // File objects selected but not yet uploaded
+let currentProjectSlug = '';
+let currentProject = '';
+
+function getAuth() {
+  const a = sessionStorage.getItem('auth');
+  if (!a) { window.location.href = 'index.html'; return null; }
+  return a;
+}
+function logout() { sessionStorage.clear(); window.location.href = 'index.html'; }
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function showToast(msg, type='success') {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span>${type==='success'?'✅':'❌'}</span> ${msg}`;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+function daysSince(d) { return Math.floor((Date.now()-new Date(d).getTime())/86400000); }
+
+async function init() {
+  currentProject     = sessionStorage.getItem('current_project') || '';
+  currentProjectSlug = sessionStorage.getItem('current_project_slug') || '';
+  if (!currentProject) { window.location.href = 'projects.html'; return; }
+  if (!getAuth()) return;
+
+  document.getElementById('userBadge').textContent =
+    sessionStorage.getItem('display_name') || sessionStorage.getItem('username') || '?';
+  document.getElementById('projectTitle').textContent = currentProject;
+  document.getElementById('projectSub').textContent   = `Project: ${currentProject}`;
+
+  await Promise.all([loadCommits(), refreshRulesStatus()]);
+}
+
+// ── Commits ──────────────────────────────────────────────────
+async function loadCommits() {
+  const auth = getAuth();
+  try {
+    const enc = encodeURIComponent(`project:${currentProject} status:open`);
+    const url = `${PROXY}/a/changes/?q=${enc}&n=200&o=CURRENT_REVISION&o=DETAILED_ACCOUNTS&o=CURRENT_COMMIT`;
+    const r = await fetch(url, { headers: { Authorization: auth } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    allCommits = await r.json();
+    renderCommits(allCommits);
+  } catch (err) {
+    document.getElementById('commitsContainer').innerHTML =
+      `<div class="empty-state"><div class="icon">⚠️</div><p>${escHtml(err.message)}</p></div>`;
+  }
+}
+
+function filterCommits() {
+  const q = document.getElementById('searchBar').value.toLowerCase();
+  renderCommits(q ? allCommits.filter(c =>
+    (c.subject||'').toLowerCase().includes(q) ||
+    ((c.owner?.display_name||c.owner?.name||'')).toLowerCase().includes(q)
+  ) : allCommits);
+}
+
+function renderCommits(commits) {
+  document.getElementById('commitCount').textContent =
+    `${commits.length} commit${commits.length!==1?'s':''}`;
+
+  const container = document.getElementById('commitsContainer');
+  if (!commits.length) {
+    container.innerHTML = `<div class="empty-state"><div class="icon">🎉</div><p>No open changes in this project.</p></div>`;
+    return;
+  }
+
+  window._commitMap = {};
+  container.innerHTML = `<div class="commit-list">${commits.map((c, i) => {
+    window._commitMap[i] = c;
+    const owner = c.owner?.display_name || c.owner?.name || c.owner?.username || 'Unknown';
+    const days  = daysSince(c.created);
+    const age   = days === 0 ? 'Today' : days === 1 ? '1 day ago' : `${days} days ago`;
+    return `
+    <div class="commit-card" onclick="openCommit(${i})">
+      <div>
+        <div class="commit-subject">${escHtml(c.subject||'(no subject)')}</div>
+        <div class="commit-meta">by <strong>${escHtml(owner)}</strong> · ${age}</div>
+      </div>
+      <div class="commit-num">#${c._number}</div>
+      <div><span class="badge badge-open">OPEN</span></div>
+      <div style="color:var(--muted);font-size:18px">›</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function openCommit(i) {
+  const c = window._commitMap[i];
+  if (!c) return;
+  sessionStorage.setItem('current_change_id',  c.change_id);
+  sessionStorage.setItem('current_change_num', c._number);
+  sessionStorage.setItem('current_subject',    c.subject || '');
+  // project + slug already in sessionStorage
+  window.location.href = 'review.html';
+}
+
+// ── Rules management ─────────────────────────────────────────
+function onFilesSelected(input) {
+  pendingFiles = Array.from(input.files);
+  const btn = document.getElementById('loadRulesBtn');
+  if (pendingFiles.length > 0) {
+    btn.disabled = false;
+    btn.textContent = `⬆️ Load ${pendingFiles.length} File${pendingFiles.length>1?'s':''}`;
+  } else {
+    btn.disabled = true;
+    btn.textContent = '⬆️ Load Rules';
+  }
+}
+
+async function loadRules() {
+  if (!pendingFiles.length) return;
+  const btn = document.getElementById('loadRulesBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Uploading…';
+
+  try {
+    const fd = new FormData();
+    for (const f of pendingFiles) fd.append('files', f);
+    fd.append('project_slug', currentProjectSlug);
+
+    const r = await fetch('/rules/upload', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const res = await r.json();
+    showToast(`✅ Loaded ${res.saved} rules file${res.saved!==1?'s':''} for "${currentProject}"`);
+  } catch (err) {
+    showToast('Failed to upload rules: ' + err.message, 'error');
+  } finally {
+    pendingFiles = [];
+    document.getElementById('rulesFileInput').value = '';
+    btn.textContent = '⬆️ Load Rules';
+    btn.disabled = true;
+    await refreshRulesStatus();
+  }
+}
+
+async function clearRules() {
+  if (!confirm(`Clear ALL rules for "${currentProject}"? This cannot be undone.`)) return;
+  try {
+    const r = await fetch(`/rules/clear/${encodeURIComponent(currentProjectSlug)}`, { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    showToast(`🗑 Rules cleared for "${currentProject}"`);
+    await refreshRulesStatus();
+  } catch (err) {
+    showToast('Failed to clear rules: ' + err.message, 'error');
+  }
+}
+
+async function refreshRulesStatus() {
+  try {
+    const r = await fetch(`/rules/list/${encodeURIComponent(currentProjectSlug)}`);
+    const data = r.ok ? await r.json() : { files: [], skill_ready: false };
+    const files = (data.files || []).filter(f => !f.startsWith('_'));
+
+    const list      = document.getElementById('rulesFilesList');
+    const badge     = document.getElementById('rulesStatusBadge');
+    const clearBtn  = document.getElementById('clearRulesBtn');
+    const skillBadge = document.getElementById('skillReadyBadge');
+    const skillWrap  = document.getElementById('skillProgressWrap');
+
+    if (files.length) {
+      list.innerHTML = files.map(f =>
+        `<span class="rules-file-chip">📄 ${escHtml(f)}</span>`).join('');
+      badge.textContent = `✅ ${files.length} rule${files.length>1?'s':''} active`;
+      badge.className = 'rules-status-badge rules-active';
+      clearBtn.style.display = '';
+    } else {
+      list.innerHTML = `<span class="rules-empty-hint">No rules loaded — reviewer uses default analysis</span>`;
+      badge.textContent = '⚪ No Rules';
+      badge.className = 'rules-status-badge rules-inactive';
+      clearBtn.style.display = 'none';
+      skillBadge.classList.remove('visible');
+      skillWrap.classList.remove('visible');
+    }
+
+    // Skill ready state
+    if (data.skill_ready) {
+      skillWrap.classList.remove('visible');
+      skillBadge.classList.add('visible');
+    } else if (files.length) {
+      // Files exist but skill not ready — show progress bar and start polling
+      skillBadge.classList.remove('visible');
+      skillWrap.classList.add('visible');
+      startSkillPolling();
+    }
+  } catch(e) { /* silent */ }
+}
+
+let _skillPollTimer = null;
+let _skillPollProgress = 0;
+
+function startSkillPolling() {
+  if (_skillPollTimer) return; // already polling
+  _skillPollProgress = 5;
+  const bar = document.getElementById('skillProgressBar');
+  if (bar) bar.style.width = _skillPollProgress + '%';
+
+  _skillPollTimer = setInterval(async () => {
+    // Animate progress bar (fake fill — never reaches 100% until done)
+    _skillPollProgress = Math.min(_skillPollProgress + Math.random() * 8, 88);
+    if (bar) bar.style.width = _skillPollProgress + '%';
+
+    try {
+      const r = await fetch(`/rules/compress-status/${encodeURIComponent(currentProjectSlug)}`);
+      const data = r.ok ? await r.json() : {};
+      if (data.skill_ready) {
+        // Done — fill bar, swap to badge
+        if (bar) bar.style.width = '100%';
+        setTimeout(() => {
+          clearInterval(_skillPollTimer);
+          _skillPollTimer = null;
+          document.getElementById('skillProgressWrap').classList.remove('visible');
+          document.getElementById('skillReadyBadge').classList.add('visible');
+          showToast('🧠 Skill generated — compressed rules active for next review!');
+        }, 500);
+      }
+    } catch(e) { /* keep polling */ }
+  }, 2500);
+}
+
+init();
+</script>
+</body>
+</html>

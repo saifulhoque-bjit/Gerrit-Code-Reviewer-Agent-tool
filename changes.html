@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Open Changes — Gerrit AI Reviewer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-brand">
+    <span>🤖</span> Gerrit AI Code Reviewer
+  </div>
+  <div class="topnav-right">
+    <span class="user-badge" id="userBadge">…</span>
+    <button class="btn btn-ghost" onclick="logout()">Sign Out</button>
+  </div>
+</nav>
+
+<div class="page">
+  <div class="page-header">
+    <h2>Open Reviews</h2>
+    <p>All pending changes awaiting review across projects</p>
+  </div>
+
+  <div class="stats-row" id="statsRow">
+    <div class="stat-card"><div class="num" id="statTotal">—</div><div class="label">Total Open Changes</div></div>
+    <div class="stat-card"><div class="num" id="statProjects">—</div><div class="label">Projects</div></div>
+    <div class="stat-card"><div class="num" id="statOldest">—</div><div class="label">Oldest Change (days)</div></div>
+  </div>
+
+  <input class="search-bar" id="searchBar" type="text" placeholder="🔍 Search changes by subject, owner, or project…" oninput="filterChanges()" />
+
+  <div id="changesContainer">
+    <div class="loading">
+      <div class="spinner"></div>
+      <p style="margin-top:12px;color:var(--muted)">Loading changes from Gerrit…</p>
+    </div>
+  </div>
+</div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<script>
+const PROXY = 'http://localhost:7474/api';
+let allChanges = [];
+
+function getAuth() {
+  const auth = sessionStorage.getItem('auth');
+  if (!auth) { window.location.href = 'index.html'; return null; }
+  return auth;
+}
+
+function logout() {
+  sessionStorage.clear();
+  window.location.href = 'index.html';
+}
+
+function showToast(msg, type='success') {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span>${type==='success'?'✅':'❌'}</span> ${msg}`;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
+function daysSince(dateStr) {
+  const d = new Date(dateStr);
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+}
+
+async function loadChanges() {
+  const auth = getAuth();
+  if (!auth) return;
+
+  document.getElementById('userBadge').textContent =
+    sessionStorage.getItem('display_name') || sessionStorage.getItem('username') || '?';
+
+  try {
+    const params = new URLSearchParams({
+      q: 'status:open',
+      n: '200',
+      o: ['LABELS', 'CURRENT_REVISION', 'DETAILED_ACCOUNTS', 'CURRENT_COMMIT'].join('&o=')
+    });
+    // Build URL manually to keep multiple o= params
+    const url = `${PROXY}/a/changes/?q=status:open&n=200&o=LABELS&o=CURRENT_REVISION&o=DETAILED_ACCOUNTS&o=CURRENT_COMMIT`;
+    const r = await fetch(url, { headers: { 'Authorization': auth } });
+    if (!r.ok) {
+      if (r.status === 401) { window.location.href = 'index.html'; return; }
+      throw new Error(`HTTP ${r.status}`);
+    }
+    allChanges = await r.json();
+    renderChanges(allChanges);
+  } catch (err) {
+    document.getElementById('changesContainer').innerHTML = `
+      <div class="empty-state">
+        <div class="icon">⚠️</div>
+        <p>Failed to load changes: ${err.message}</p>
+      </div>`;
+    showToast('Failed to load changes: ' + err.message, 'error');
+  }
+}
+
+function filterChanges() {
+  const q = document.getElementById('searchBar').value.toLowerCase();
+  if (!q) { renderChanges(allChanges); return; }
+  const filtered = allChanges.filter(c =>
+    (c.subject||'').toLowerCase().includes(q) ||
+    (c.project||'').toLowerCase().includes(q) ||
+    ((c.owner?.name||c.owner?.username||'')).toLowerCase().includes(q)
+  );
+  renderChanges(filtered);
+}
+
+function renderChanges(changes) {
+  // Stats
+  const projects = [...new Set(changes.map(c => c.project))];
+  document.getElementById('statTotal').textContent = changes.length;
+  document.getElementById('statProjects').textContent = projects.length;
+  if (changes.length) {
+    const oldest = Math.max(...changes.map(c => daysSince(c.created)));
+    document.getElementById('statOldest').textContent = oldest;
+  }
+
+  // Group by project
+  const grouped = {};
+  for (const c of changes) {
+    if (!grouped[c.project]) grouped[c.project] = [];
+    grouped[c.project].push(c);
+  }
+
+  const container = document.getElementById('changesContainer');
+  if (!changes.length) {
+    container.innerHTML = `<div class="empty-state"><div class="icon">🎉</div><p>No open changes found.</p></div>`;
+    return;
+  }
+
+  // Store change data in a map keyed by index to avoid inline string escaping issues
+  window._changeMap = {};
+  let globalIdx = 0;
+
+  let html = '';
+  for (const [project, pChanges] of Object.entries(grouped).sort()) {
+    html += `
+    <div class="project-group">
+      <div class="project-header" onclick="toggleProject(this)">
+        <div class="project-name">
+          📁 ${escHtml(project)}
+          <span class="project-badge">${pChanges.length}</span>
+        </div>
+        <span>▼</span>
+      </div>
+      <div class="project-body" style="display:none">
+        ${pChanges.map(c => {
+          const idx = globalIdx++;
+          window._changeMap[idx] = c;
+          return renderChangeRow(c, idx);
+        }).join('')}
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html;
+
+  // Auto-open first project
+  const firstHeader = container.querySelector('.project-header');
+  if (firstHeader) {
+    firstHeader.classList.add('open');
+    firstHeader.nextElementSibling.style.display = '';
+  }
+}
+
+function renderChangeRow(c, idx) {
+  const owner = c.owner?.display_name || c.owner?.name || c.owner?.username || 'Unknown';
+  const days = daysSince(c.created);
+  const daysLabel = days === 0 ? 'Today' : days === 1 ? '1 day ago' : `${days} days ago`;
+  const subject = escHtml(c.subject || '(no subject)');
+  const num = c._number;
+
+  return `
+  <div class="change-row" onclick="openChange(${idx})">
+    <div>
+      <div class="change-subject">${subject}</div>
+      <div class="change-meta">by <strong>${escHtml(owner)}</strong> · ${daysLabel}</div>
+    </div>
+    <div class="change-id">#${num}</div>
+    <div><span class="badge badge-open">OPEN</span></div>
+    <div style="color:var(--muted);font-size:18px">›</div>
+  </div>`;
+}
+
+function toggleProject(header) {
+  const body = header.nextElementSibling;
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : '';
+  header.classList.toggle('open', !isOpen);
+  header.querySelector('span:last-child').textContent = isOpen ? '▼' : '▲';
+}
+
+function openChange(idx) {
+  const c = window._changeMap[idx];
+  if (!c) return;
+  sessionStorage.setItem('current_change_id', c.change_id);
+  sessionStorage.setItem('current_change_num', c._number);
+  sessionStorage.setItem('current_project', c.project);
+  sessionStorage.setItem('current_subject', c.subject || '');
+  window.location.href = 'review.html';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function escAttr(s) {
+  return String(s).replace(/'/g,"\\'");
+}
+
+loadChanges();
+</script>
+</body>
+</html>

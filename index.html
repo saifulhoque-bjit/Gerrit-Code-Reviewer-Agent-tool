@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gerrit AI Code Reviewer — Login</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="icon">🤖</div>
+      <h1>Gerrit AI Code Reviewer</h1>
+      <p>BJIT Group — review2.bjitgroup.com</p>
+    </div>
+
+    <form id="loginForm">
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="username" placeholder="your.name" autocomplete="username" required />
+      </div>
+      <div class="form-group">
+        <label>HTTP Password <span style="color:var(--muted)">(Gerrit HTTP password, not LDAP)</span></label>
+        <input type="password" id="password" placeholder="••••••••" autocomplete="current-password" required />
+      </div>
+      <button type="submit" class="btn btn-primary btn-full" id="loginBtn">
+        <span id="loginBtnText">Sign In</span>
+      </button>
+      <div class="error-msg" id="errorMsg"></div>
+    </form>
+
+    <p class="hint">
+      Get your HTTP password at<br>
+      <a href="https://review2.bjitgroup.com:8443/settings/#HTTPCredentials" target="_blank">
+        Gerrit → Settings → HTTP Credentials
+      </a>
+    </p>
+  </div>
+</div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<script>
+const PROXY = 'http://localhost:7474/api';
+
+function makeAuthHeader(user, pass) {
+  return 'Basic ' + btoa(user + ':' + pass);
+}
+
+function showToast(msg, type='success') {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span>${type === 'success' ? '✅' : '❌'}</span> ${msg}`;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const btn = document.getElementById('loginBtn');
+  const errMsg = document.getElementById('errorMsg');
+
+  btn.disabled = true;
+  document.getElementById('loginBtnText').textContent = 'Signing in…';
+  errMsg.textContent = '';
+
+  try {
+    const auth = makeAuthHeader(username, password);
+    // Validate credentials by hitting /a/accounts/self
+    const r = await fetch(PROXY + '/a/accounts/self', {
+      headers: { 'Authorization': auth }
+    });
+
+    if (r.ok) {
+      const data = await r.json();
+      // Store credentials in sessionStorage
+      sessionStorage.setItem('auth', auth);
+      sessionStorage.setItem('username', data.username || username);
+      sessionStorage.setItem('display_name', data.display_name || username);
+      showToast('Login successful! Redirecting…');
+      setTimeout(() => { window.location.href = 'projects.html'; }, 800);
+    } else if (r.status === 401) {
+      errMsg.textContent = 'Invalid username or HTTP password. Check your Gerrit HTTP credentials.';
+    } else {
+      errMsg.textContent = `Login failed (HTTP ${r.status}). Is the proxy server running?`;
+    }
+  } catch (err) {
+    errMsg.textContent = 'Cannot reach proxy server. Make sure server.py is running on port 7474.';
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    document.getElementById('loginBtnText').textContent = 'Sign In';
+  }
+});
+
+// If already logged in, go straight to projects
+if (sessionStorage.getItem('auth')) {
+  window.location.href = 'projects.html';
+}
+
+
+</script>
+</body>
+</html>
