@@ -14,6 +14,7 @@
   </div>
   <div class="topnav-right">
     <span class="user-badge" id="userBadge">…</span>
+    <button class="btn btn-ghost" onclick="openSettings()">⚙️ Settings</button>
     <button class="btn btn-ghost" onclick="logout()">Sign Out</button>
   </div>
 </nav>
@@ -216,6 +217,37 @@ function escAttr(s) {
 }
 
 loadChanges();
+
+// Settings modal
+function openSettings() { window._settingsModal ? window._settingsModal.style.display='flex' : createSettingsModal(); }
+
+function createSettingsModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999';
+  overlay.onclick = e => { if (e.target === overlay) overlay.style.display = 'none'; };
+
+  const enabled = localStorage.getItem('auto_analyze_enabled') !== 'false';
+  overlay.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.4)">
+      <h3 style="margin:0 0 20px;font-size:17px">⚙️ Global Settings</h3>
+      <label style="display:flex;align-items:center;gap:12px;cursor:pointer;font-size:14px">
+        <input type="checkbox" id="toggleAutoAnalyze" ${enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
+        <div>
+          <div style="font-weight:600">🧠 Codebase Analysis</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:3px">Clone + index repos for better AI review context</div>
+        </div>
+      </label>
+      <div style="margin-top:24px;text-align:right">
+        <button onclick="this.closest('div[style*=fixed]').style.display='none'" style="background:var(--accent);color:white;border:none;border-radius:8px;padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  window._settingsModal = overlay;
+
+  document.getElementById('toggleAutoAnalyze').onchange = function() {
+    localStorage.setItem('auto_analyze_enabled', this.checked ? 'true' : 'false');
+  };
+}
 </script>
 </body>
 </html>

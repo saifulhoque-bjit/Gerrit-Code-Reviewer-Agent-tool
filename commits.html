@@ -175,6 +175,7 @@
   </div>
   <div class="topnav-right">
     <a href="projects.html" class="btn btn-ghost">← Projects</a>
+    <button class="btn btn-ghost" onclick="openSettings()">⚙️ Settings</button>
     <span class="user-badge" id="userBadge">…</span>
     <button class="btn btn-ghost" onclick="logout()">Sign Out</button>
   </div>
@@ -183,9 +184,17 @@
 <div class="page">
 
   <!-- Project title -->
-  <div class="page-header">
-    <h2 id="projectTitle">Loading…</h2>
-    <p id="projectSub"></p>
+  <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div>
+      <h2 id="projectTitle">Loading…</h2>
+      <p id="projectSub"></p>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="rules-badge" id="analyzeStatusBadge" style="font-size:12px;padding:4px 12px">⏳</span>
+      <button class="btn btn-primary" id="analyzeBtn" onclick="startAnalyze()" style="font-size:13px;padding:8px 18px">
+        🧠 Analyze
+      </button>
+    </div>
   </div>
 
   <!-- Rules toolbar -->
@@ -281,7 +290,7 @@ async function init() {
   document.getElementById('projectTitle').textContent = currentProject;
   document.getElementById('projectSub').textContent   = `Project: ${currentProject}`;
 
-  await Promise.all([loadCommits(), refreshRulesStatus()]);
+  await Promise.all([loadCommits(), refreshRulesStatus(), loadAnalyzeStatus()]);
 }
 
 // ── Commits ──────────────────────────────────────────────────
@@ -468,6 +477,333 @@ function startSkillPolling() {
       }
     } catch(e) { /* keep polling */ }
   }, 2500);
+}
+
+// ── Codebase Analysis ────────────────────────────────────────
+async function loadAnalyzeStatus() {
+  const badge = document.getElementById('analyzeStatusBadge');
+  const btn = document.getElementById('analyzeBtn');
+  if (!badge || !currentProjectSlug) return;
+  try {
+    const r = await fetch(`/projects/status/${encodeURIComponent(currentProjectSlug)}`);
+    if (!r.ok) { badge.textContent = '⚪'; return; }
+    const data = await r.json();
+
+    // Error takes priority — show it and stop polling
+    if (data.error) {
+      badge.textContent = '⚠️ Error';
+      badge.style.background = 'rgba(255,95,87,0.12)';
+      badge.style.color = 'var(--red)';
+      badge.title = data.error;
+      badge.style.cursor = 'pointer';
+      badge.onclick = () => showToast('❌ ' + data.error, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '🧠 Retry'; }
+      showToast('Analysis error: ' + data.error, 'error');
+      return;
+    }
+
+    if (data.indexing) {
+      badge.textContent = '🔄 Analyzing…';
+      badge.style.background = 'rgba(79,142,247,0.15)';
+      badge.style.color = 'var(--accent)';
+      badge.onclick = null;
+      if (btn) { btn.disabled = true; btn.textContent = '🔄 Analyzing…'; }
+      setTimeout(loadAnalyzeStatus, 5000);
+    } else if (data.indexed) {
+      badge.textContent = '🧠 Analyzed';
+      badge.style.background = 'rgba(61,220,132,0.15)';
+      badge.style.color = 'var(--green)';
+      badge.onclick = null;
+      if (btn) { btn.disabled = false; btn.textContent = '🧠 Re-analyze'; }
+    } else if (data.cloned) {
+      badge.textContent = '📁 Cloned (not analyzed)';
+      badge.style.background = 'rgba(79,142,247,0.12)';
+      badge.style.color = 'var(--accent)';
+      badge.onclick = null;
+      if (btn) { btn.disabled = false; btn.textContent = '🧠 Analyze'; }
+    } else {
+      badge.textContent = '⚪ Not set up';
+      badge.onclick = null;
+      if (btn) { btn.disabled = false; btn.textContent = '🧠 Analyze'; }
+    }
+  } catch { badge.textContent = '⚪'; }
+}
+
+async function startAnalyze() {
+  const btn = document.getElementById('analyzeBtn');
+  if (!currentProjectSlug) return;
+  const auth = getAuth();
+
+  // Build git URL automatically from Gerrit host + project name
+  const gitUrl = `https://review2.bjitgroup.com:8443/a/${currentProject}`;
+
+  // Check if already cloned — skip straight to branch picker
+  try {
+    const statusR = await fetch(`/projects/status/${encodeURIComponent(currentProjectSlug)}`);
+    if (statusR.ok) {
+      const s = await statusR.json();
+      if (s.cloned) {
+        await showBranchPicker(auth);
+        return;
+      }
+    }
+  } catch {}
+
+  if (btn) { btn.disabled = true; btn.textContent = '🔄 Cloning…'; }
+  updateAnalyzeBadge('cloning');
+
+  try {
+    const cloneR = await fetch(`/projects/clone/${encodeURIComponent(currentProjectSlug)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': auth },
+      body: JSON.stringify({ git_url: gitUrl, project: currentProject })
+    });
+    const cloneData = await cloneR.json();
+    if (cloneData.error) throw new Error(cloneData.error);
+    showToast(`Cloning ${currentProject}… Please wait.`);
+    pollUntilCloned(auth);
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = '🧠 Analyze'; }
+    updateAnalyzeBadge('error', err.message);
+    showToast('Failed: ' + err.message, 'error');
+  }
+}
+
+async function pollUntilCloned(auth) {
+  const btn = document.getElementById('analyzeBtn');
+  try {
+    const r = await fetch(`/projects/status/${encodeURIComponent(currentProjectSlug)}`);
+    if (!r.ok) { setTimeout(() => pollUntilCloned(auth), 3000); return; }
+    const data = await r.json();
+    if (data.error) {
+      if (btn) { btn.disabled = false; btn.textContent = '🧠 Analyze'; }
+      updateAnalyzeBadge('error', data.error);
+      showToast('Clone failed: ' + data.error, 'error');
+      return;
+    }
+    // Show live status on button while cloning
+    const msg = data.status_msg || '';
+    if (btn && !data.clone_done) {
+      btn.textContent = msg ? `🔄 ${msg}` : '🔄 Cloning…';
+    }
+    if (data.clone_done || data.cloned) {
+      if (btn) { btn.disabled = false; btn.textContent = '🧠 Analyze'; }
+      showToast(`✅ ${currentProject} cloned — select a branch to analyze.`);
+      await showBranchPicker(auth);
+    } else {
+      setTimeout(() => pollUntilCloned(auth), 3000);
+    }
+  } catch { setTimeout(() => pollUntilCloned(auth), 3000); }
+}
+
+async function showBranchPicker(auth) {
+  // Show modal immediately with a spinner while fetching branches
+  const overlay = document.createElement('div');
+  overlay.id = 'branchPickerOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);display:flex;align-items:center;justify-content:center;z-index:9999';
+  overlay.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 32px;max-width:460px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+      <h3 style="margin:0 0 6px;font-size:17px">🌿 Select Branch to Analyze</h3>
+      <p style="margin:0 0 20px;font-size:13px;color:var(--muted)">${currentProject}</p>
+      <div id="branchPickerBody" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px 0">
+        <div class="spinner" style="width:32px;height:32px;border-width:3px"></div>
+        <span style="font-size:13px;color:var(--muted)">Fetching branch list…</span>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:20px">
+        <button id="branchCancelBtn" style="background:var(--bg3);color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('branchCancelBtn').onclick = () => overlay.remove();
+
+  // Fetch branches
+  let branches = [];
+  try {
+    const r = await fetch(`/projects/branches/${encodeURIComponent(currentProjectSlug)}`, {
+      headers: { 'Authorization': auth }
+    });
+    if (r.ok) {
+      const data = await r.json();
+      branches = data.branches || [];
+    }
+  } catch {}
+
+  // Overlay was cancelled while loading
+  if (!document.getElementById('branchPickerOverlay')) return;
+
+  if (!branches.length) {
+    overlay.remove();
+    showToast('Could not fetch branch list — starting analysis on current branch.', 'error');
+    await startIndexing('master', auth);
+    return;
+  }
+
+  // Swap spinner for branch list
+  const preferred = ['main', 'master', 'develop', 'development', 'dev'];
+  const defaultBranch = preferred.find(b => branches.includes(b)) || branches[0];
+
+  document.getElementById('branchPickerBody').innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto;padding-right:4px;width:100%">
+      ${branches.map(b => `
+        <label style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer;border:1px solid var(--border);background:${b === defaultBranch ? 'rgba(79,142,247,0.08)' : ''}">
+          <input type="radio" name="branchPick" value="${b}" ${b === defaultBranch ? 'checked' : ''} style="accent-color:var(--accent)">
+          <span style="font-size:13px;font-family:monospace">${b}</span>
+          ${b === defaultBranch ? '<span style="margin-left:auto;font-size:11px;color:var(--accent);font-weight:600">default</span>' : ''}
+        </label>`).join('')}
+    </div>`;
+
+  // Swap subtitle
+  overlay.querySelector('p').textContent = `${currentProject} — ${branches.length} branch${branches.length !== 1 ? 'es' : ''} found`;
+
+  // Add Analyze button
+  const footer = overlay.querySelector('div[style*="justify-content:flex-end"]');
+  const okBtn = document.createElement('button');
+  okBtn.id = 'branchOkBtn';
+  okBtn.style.cssText = 'background:var(--accent);color:white;border:none;border-radius:8px;padding:8px 22px;font-size:13px;font-weight:600;cursor:pointer';
+  okBtn.textContent = '🧠 Analyze';
+  footer.insertBefore(okBtn, footer.firstChild);
+
+    okBtn.onclick = async () => {
+    const picked = overlay.querySelector('input[name="branchPick"]:checked');
+    if (!picked) return;
+    const pickedBranch = picked.value;
+
+    // Replace modal content with live status card
+    const card = overlay.querySelector('div[style*="border-radius:16px"]');
+    card.innerHTML = `
+      <h3 style="margin:0 0 6px;font-size:17px" id="analyzeDialogTitle">⏳ Preparing…</h3>
+      <p style="margin:0 0 20px;font-size:13px;color:var(--muted)">${currentProject}</p>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:14px;padding:8px 0 16px">
+        <div class="spinner" style="width:40px;height:40px;border-width:4px"></div>
+        <div id="analyzeDialogStatus" style="font-size:13px;color:var(--muted);text-align:center">Starting…</div>
+      </div>
+      <div style="display:flex;justify-content:flex-end">
+        <button onclick="document.getElementById('branchPickerOverlay').remove()" style="background:var(--bg3);color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer">Close</button>
+      </div>`;
+
+    await startIndexing(pickedBranch, auth);
+
+    // Poll and update dialog with live phase labels
+    const pollDialog = async () => {
+      const dlg = document.getElementById('branchPickerOverlay');
+      if (!dlg) return;
+      const titleEl  = document.getElementById('analyzeDialogTitle');
+      const statusEl = document.getElementById('analyzeDialogStatus');
+      try {
+        const r = await fetch(`/projects/status/${encodeURIComponent(currentProjectSlug)}`);
+        if (r.ok) {
+          const data = await r.json();
+
+          if (data.error) {
+            if (titleEl)  titleEl.textContent  = '❌ Failed';
+            if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = 'var(--red)'; }
+            dlg.remove();
+            showToast('Analysis error: ' + data.error, 'error');
+            loadAnalyzeStatus();
+            return;
+          }
+
+          if (data.indexed) {
+            dlg.remove();
+            showToast(`✅ ${currentProject} analyzed successfully!`);
+            loadAnalyzeStatus();
+            return;
+          }
+
+          // Map server status_msg → friendly phase label
+          const msg = data.status_msg || '';
+          let phase = '⏳ Working…';
+          let detail = msg;
+          if (msg.toLowerCase().includes('fetching')) {
+            phase = '📡 Fetching branch…';
+          } else if (msg.toLowerCase().includes('checking out') || msg.toLowerCase().includes('already on')) {
+            phase = `🔀 Checking out ${pickedBranch}…`;
+          } else if (data.indexing || msg.toLowerCase().includes('index')) {
+            phase = '🧠 Analysing codebase…';
+            detail = msg || `Scanning source files…`;
+          } else if (msg.toLowerCase().includes('clone')) {
+            phase = '🔄 Cloning…';
+          }
+
+          if (titleEl)  titleEl.textContent  = phase;
+          if (statusEl) statusEl.textContent = detail || phase;
+        }
+      } catch {}
+      setTimeout(pollDialog, 2000);
+    };
+    setTimeout(pollDialog, 1500);
+  };
+}
+
+async function startIndexing(branch, auth) {
+  const btn = document.getElementById('analyzeBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '🔀 Checking out…'; }
+  updateAnalyzeBadge('indexing');
+
+  try {
+    const r = await fetch(`/projects/checkout/${encodeURIComponent(currentProjectSlug)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': auth },
+      body: JSON.stringify({ branch: branch || 'master' })
+    });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    if (btn) btn.textContent = '🧠 Analysing…';
+  } catch (err) {
+    const overlay = document.getElementById('branchPickerOverlay');
+    if (overlay) overlay.remove();
+    if (btn) { btn.disabled = false; btn.textContent = '🧠 Retry'; }
+    updateAnalyzeBadge('error', err.message);
+    showToast('Failed: ' + err.message, 'error');
+  }
+}
+
+function updateAnalyzeBadge(state, detail) {
+  const badge = document.getElementById('analyzeStatusBadge');
+  if (!badge) return;
+  const map = {
+    cloning:  ['🔄 Cloning…',   'rgba(79,142,247,0.15)',  'var(--accent)'],
+    indexing: ['🔄 Analyzing…', 'rgba(79,142,247,0.15)',  'var(--accent)'],
+    analyzed: ['🧠 Analyzed',   'rgba(61,220,132,0.15)',  'var(--green)'],
+    error:    ['⚠️ Error',      'rgba(255,95,87,0.12)',   'var(--red)'],
+  };
+  const [text, bg, color] = map[state] || ['⚪', '', ''];
+  badge.textContent = text;
+  badge.style.background = bg;
+  badge.style.color = color;
+  if (detail) badge.title = detail;
+}
+
+// Settings modal
+function openSettings() { window._settingsModal ? window._settingsModal.style.display='flex' : createSettingsModal(); }
+
+function createSettingsModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999';
+  overlay.onclick = e => { if (e.target === overlay) overlay.style.display = 'none'; };
+
+  const enabled = localStorage.getItem('auto_analyze_enabled') !== 'false';
+  overlay.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.4)">
+      <h3 style="margin:0 0 20px;font-size:17px">⚙️ Global Settings</h3>
+      <label style="display:flex;align-items:center;gap:12px;cursor:pointer;font-size:14px">
+        <input type="checkbox" id="toggleAutoAnalyze" ${enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
+        <div>
+          <div style="font-weight:600">🧠 Codebase Analysis</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:3px">Clone + index repos for better AI review context</div>
+        </div>
+      </label>
+      <div style="margin-top:24px;text-align:right">
+        <button onclick="this.closest('div[style*=fixed]').style.display='none'" style="background:var(--accent);color:white;border:none;border-radius:8px;padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  window._settingsModal = overlay;
+
+  document.getElementById('toggleAutoAnalyze').onchange = function() {
+    localStorage.setItem('auto_analyze_enabled', this.checked ? 'true' : 'false');
+    showToast(this.checked ? '🧠 Analysis enabled' : '🧠 Analysis disabled');
+  };
 }
 
 init();

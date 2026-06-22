@@ -223,17 +223,30 @@ a:hover { text-decoration: underline; }
 /* ===== REVIEW PAGE ===== */
 .review-layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 280px 4px 1fr;
   height: calc(100vh - 56px);
   overflow: hidden;
 }
 
 .file-sidebar {
   background: var(--bg2);
-  border-right: 1px solid var(--border);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+  min-width: 150px;
+  max-width: 600px;
+}
+
+/* Drag handle between sidebar and main */
+.resize-handle {
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.15s;
+  user-select: none;
+}
+.resize-handle:hover,
+.resize-handle.active {
+  background: var(--accent);
 }
 
 .sidebar-header {

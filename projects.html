@@ -84,6 +84,7 @@
   </div>
   <div class="topnav-right">
     <span class="user-badge" id="userBadge">…</span>
+    <button class="btn btn-ghost" onclick="openSettings()">⚙️ Settings</button>
     <button class="btn btn-ghost" onclick="logout()">Sign Out</button>
   </div>
 </nav>
@@ -125,6 +126,7 @@ function getAuth() {
 }
 function logout() { sessionStorage.clear(); window.location.href = 'index.html'; }
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 function showToast(msg, type='success') {
   const c = document.getElementById('toastContainer');
   const t = document.createElement('div');
@@ -140,31 +142,49 @@ async function loadAll() {
     sessionStorage.getItem('display_name') || sessionStorage.getItem('username') || '?';
 
   try {
-    // Load open changes
-    const url = `${PROXY}/a/changes/?q=status:open&n=500&o=LABELS`;
-    const r = await fetch(url, { headers: { Authorization: auth } });
-    if (!r.ok) { if (r.status === 401) { window.location.href='index.html'; return; } throw new Error(`HTTP ${r.status}`); }
-    const changes = await r.json();
-
-    // Group by project
-    const grouped = {};
-    for (const c of changes) {
-      if (!grouped[c.project]) grouped[c.project] = 0;
-      grouped[c.project]++;
+    // Fetch ALL projects from Gerrit directly (paginate if needed)
+    let allProjectNames = [];
+    let skip = 0;
+    while (true) {
+      const projUrl = `${PROXY}/a/projects/?type=CODE&n=500&S=${skip}`;
+      const projR = await fetch(projUrl, { headers: { Authorization: auth } });
+      if (!projR.ok) {
+        if (projR.status === 401) { window.location.href = 'index.html'; return; }
+        throw new Error(`HTTP ${projR.status}`);
+      }
+      const projData = await projR.json();
+      const batch = Object.keys(projData).filter(n => projData[n].state !== 'HIDDEN');
+      allProjectNames = allProjectNames.concat(batch);
+      // Gerrit sets _more_projects flag when there are more results
+      if (!projData._more_projects || batch.length === 0) break;
+      skip += 500;
     }
+    allProjectNames.sort();
+
+    // Fetch open change counts in parallel (best-effort — failures show 0)
+    const openCountMap = {};
+    const changesUrl = `${PROXY}/a/changes/?q=status:open&n=500&o=LABELS`;
+    try {
+      const chR = await fetch(changesUrl, { headers: { Authorization: auth } });
+      if (chR.ok) {
+        const changes = await chR.json();
+        for (const c of changes) {
+          openCountMap[c.project] = (openCountMap[c.project] || 0) + 1;
+        }
+      }
+    } catch {}
 
     // Fetch rules info for all projects in parallel
-    const projectNames = Object.keys(grouped);
-    const rulesResults = await Promise.all(projectNames.map(p =>
+    const rulesResults = await Promise.all(allProjectNames.map(p =>
       fetch(`/rules/list/${encodeURIComponent(projectSlug(p))}`)
         .then(r => r.ok ? r.json() : { files: [] })
         .catch(() => ({ files: [] }))
     ));
-    rulesResults.forEach((res, i) => { rulesMap[projectNames[i]] = res.files.length; });
+    rulesResults.forEach((res, i) => { rulesMap[allProjectNames[i]] = res.files.length; });
 
-    allProjects = projectNames.sort().map(name => ({
+    allProjects = allProjectNames.map(name => ({
       name,
-      count: grouped[name],
+      count: openCountMap[name] || 0,
       rulesCount: rulesMap[name] || 0
     }));
 
@@ -209,13 +229,23 @@ function renderProjects(projects) {
         <span>📋 ${p.count} open commit${p.count!==1?'s':''}</span>
       </div>
       <div class="project-card-footer">
-        <span class="rules-badge ${p.rulesCount>0 ? 'rules-loaded':'rules-missing'}">
-          ${p.rulesCount>0 ? `✅ ${p.rulesCount} rules file${p.rulesCount>1?'s':''}` : '⚪ No rules'}
-        </span>
-        <span class="open-arrow">›</span>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span class="rules-badge ${p.rulesCount>0 ? 'rules-loaded':'rules-missing'}">
+            ${p.rulesCount>0 ? `✅ ${p.rulesCount} rule${p.rulesCount>1?'s':''}` : '⚪ No rules'}
+          </span>
+          <span class="rules-badge" id="ctx-badge-${i}" style="background:rgba(136,146,164,0.12);color:var(--muted)">⏳</span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span class="open-arrow">›</span>
+        </div>
       </div>
     </div>`;
   }).join('')}</div>`;
+
+  // Load project analysis status for each project
+  projects.forEach((p, i) => {
+    loadProjectStatus(projectSlug(p.name), i);
+  });
 }
 
 function openProject(i) {
@@ -226,7 +256,102 @@ function openProject(i) {
   window.location.href = 'commits.html';
 }
 
+async function loadProjectStatus(slug, i) {
+  const badge = document.getElementById('ctx-badge-' + i);
+  if (!badge) return;
+  try {
+    const r = await fetch(`/projects/status/${encodeURIComponent(slug)}`);
+    if (!r.ok) { badge.textContent = '⚪'; return; }
+    const data = await r.json();
+    if (data.indexing) {
+      badge.textContent = '🔄 Indexing…';
+      badge.style.background = 'rgba(79,142,247,0.15)';
+      badge.style.color = 'var(--accent)';
+      // Poll until done
+      setTimeout(() => loadProjectStatus(slug, i), 5000);
+    } else if (data.indexed) {
+      badge.textContent = '🧠 Analyzed';
+      badge.style.background = 'rgba(61,220,132,0.15)';
+      badge.style.color = 'var(--green)';
+    } else if (data.cloned) {
+      badge.textContent = '📁 Cloned';
+      badge.style.background = 'rgba(79,142,247,0.12)';
+      badge.style.color = 'var(--accent)';
+    } else {
+      badge.textContent = '⚪ No context';
+    }
+    if (data.error) {
+      badge.textContent = '⚠️ Error';
+      badge.style.background = 'rgba(255,95,87,0.12)';
+      badge.style.color = 'var(--red)';
+      badge.title = data.error;
+    }
+  } catch { badge.textContent = '⚪'; }
+}
+
+async function startAnalyze(slug, i) {
+  // Prompt for git URL if not already configured
+  let gitUrl = '';
+  try {
+    const statusR = await fetch(`/projects/status/${encodeURIComponent(slug)}`);
+    if (statusR.ok) {
+      const status = await statusR.json();
+      gitUrl = status.config?.git_url || '';
+    }
+  } catch {}
+
+  if (!gitUrl) {
+    gitUrl = prompt(`Enter Git URL for project "${slug}":\\n(e.g. https://review2.bjitgroup.com/a/project-name)`);
+    if (!gitUrl) return;
+  }
+
+  try {
+    const cloneR = await fetch(`/projects/clone/${encodeURIComponent(slug)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ git_url: gitUrl })
+    });
+    const cloneData = await cloneR.json();
+    if (cloneData.error) throw new Error(cloneData.error);
+    showToast(`Cloning ${slug}… Analysis will start automatically after clone.`);
+  } catch (err) {
+    showToast('Failed: ' + err.message, 'error');
+  }
+}
+
 loadAll();
+
+// Settings modal
+function openSettings() { window._settingsModal ? window._settingsModal.style.display='flex' : createSettingsModal(); }
+
+function createSettingsModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999';
+  overlay.onclick = e => { if (e.target === overlay) overlay.style.display = 'none'; };
+
+  const enabled = localStorage.getItem('auto_analyze_enabled') !== 'false';
+  overlay.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.4)">
+      <h3 style="margin:0 0 20px;font-size:17px">⚙️ Global Settings</h3>
+      <label style="display:flex;align-items:center;gap:12px;cursor:pointer;font-size:14px">
+        <input type="checkbox" id="toggleAutoAnalyze" ${enabled ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer">
+        <div>
+          <div style="font-weight:600">🧠 Codebase Analysis</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:3px">Clone + index repos for better AI review context</div>
+        </div>
+      </label>
+      <div style="margin-top:24px;text-align:right">
+        <button onclick="this.closest('div[style*=fixed]').style.display='none'" style="background:var(--accent);color:white;border:none;border-radius:8px;padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  window._settingsModal = overlay;
+
+  document.getElementById('toggleAutoAnalyze').onchange = function() {
+    localStorage.setItem('auto_analyze_enabled', this.checked ? 'true' : 'false');
+    showToast(this.checked ? '🧠 Analysis enabled' : '🧠 Analysis disabled');
+  };
+}
 </script>
 <footer class="bottom-bar">
   Created by <strong>Gazi Md Saiful Hoque</strong> &nbsp;|&nbsp; Team: PC Application

@@ -51,6 +51,37 @@ if %CHECKS_PASSED% neq 1 (
     exit /b 1
 )
 
+:: Check and install codebase-memory-mcp
+echo.
+echo  [..] Checking codebase-memory-mcp...
+where codebase-memory-mcp >nul 2>&1
+if %errorlevel% neq 0 (
+    if exist "D:\tools\codebase-memory-mcp.exe" (
+        echo  [OK] codebase-memory-mcp found at D:\tools\codebase-memory-mcp.exe
+    ) else (
+        echo  [WARN] codebase-memory-mcp not found.
+        echo         Download from: https://github.com/DeusData/codebase-memory-mcp/releases/latest
+        echo         Extract to D:\tools\ and add to PATH.
+        echo         Codebase indexing will not be available until installed.
+    )
+) else (
+    echo  [OK] codebase-memory-mcp is installed.
+)
+
+:: Check MCP server exists
+if not exist "%~dp0gerrit_mcp_server.py" (
+    echo  [WARN] gerrit_mcp_server.py not found. MCP tools will not be available.
+) else (
+    echo  [OK] Gerrit MCP server found.
+)
+
+:: Check rules engine exists
+if not exist "%~dp0rules_engine.py" (
+    echo  [WARN] rules_engine.py not found. Using basic rules.
+) else (
+    echo  [OK] Rules engine found.
+)
+
 :: All good - launch
 echo.
 echo  All dependencies found. Starting server...
@@ -69,7 +100,7 @@ goto waitloop
 :quit
 echo.
 echo  Stopping server...
-for /f "tokens=1" %%i in ('wmic process where "CommandLine like '%%server.py%%'" get ProcessId /NH 2^>nul') do (
+for /f "tokens=1" %%i in ('wmic process where "CommandLine like '%%server.py%%'"" get ProcessId /NH 2^>nul') do (
     taskkill /F /PID %%i >nul 2>&1
 )
 echo  Stopped. Goodbye!

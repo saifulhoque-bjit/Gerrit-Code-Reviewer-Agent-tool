@@ -1,0 +1,18 @@
+# Runtime / temp files
+temp/
+server_output.log
+project_status.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Cloned project repos (large, fetched from Gerrit)
+projects/
+
+# Logs
+*.log
+
+# MCP runtime config (contains auth tokens)
+!temp/.gitkeep

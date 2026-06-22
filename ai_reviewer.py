@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """
-AI Reviewer — writes diff to temp file, invokes Hermes CLI, parses structured output.
+AI Reviewer v3 — Orchestrator pattern for parallel code review.
+
+Architecture:
+  1. Orchestrator gets file list + per-file diffs via Gerrit REST API (Python, no hermes)
+  2. Spawns N parallel hermes workers (one per file, max 4)
+  3. Each worker reviews a single file with focused context
+  4. Orchestrator aggregates + deduplicates results
+
+Benefits:
+  - Parallel: 4 files in ~2 min (vs 3-5 min sequential)
+  - Focused: each worker sees only one file's diff (2-5K chars vs 256K)
+  - Reliable: focused prompts → less prose, more JSON
 """
 
 import os
@@ -8,34 +19,35 @@ import json
 import subprocess
 import re
 import sys
+import shutil
+import ssl
+import urllib.request
+import urllib.parse
 from pathlib import Path
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_DIR = os.path.join(DIR, "temp")
 RULES_DIR = os.path.join(DIR, "rules")
+PROJECTS_DIR = os.path.join(DIR, "projects")
+MCP_CONFIG_PATH = os.path.join(TEMP_DIR, "mcp_runtime.json")
 SKILLS_DIR = os.path.join(os.path.expanduser("~"), "AppData", "Local", "hermes", "skills", "gerrit")
+
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(RULES_DIR, exist_ok=True)
+os.makedirs(PROJECTS_DIR, exist_ok=True)
 os.makedirs(SKILLS_DIR, exist_ok=True)
 
-# Dynamically locate the hermes binary at runtime
+# ── Locate Hermes binary ─────────────────────────────────────────
 def find_hermes():
-    import shutil
-
-    # 1. Check PATH first (works in most environments)
     h = shutil.which("hermes")
     if h:
         return h
-
-    # 2. Look next to the current Python executable (same venv)
-    py = sys.executable  # e.g. .../venv/Scripts/python.exe
+    py = sys.executable
     scripts_dir = os.path.dirname(py)
     for name in ("hermes.exe", "hermes"):
         candidate = os.path.join(scripts_dir, name)
         if os.path.isfile(candidate):
             return candidate
-
-    # 3. Ask the OS shell (handles cases where PATH is set in shell but not subprocess)
     try:
         cmd = "where hermes" if os.name == "nt" else "which hermes"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
@@ -44,348 +56,296 @@ def find_hermes():
             return found
     except Exception:
         pass
-
-    # 4. Fallback: hope it resolves on PATH at call time
     return "hermes"
 
-
 HERMES_BIN = find_hermes()
-print(f"[AI Reviewer] Using Hermes binary: {HERMES_BIN}")
+print(f"[AI Reviewer v3] Using Hermes binary: {HERMES_BIN}")
 
-REVIEW_PROMPT_TEMPLATE = """You are a senior software engineer performing a code review.
+# ── Import rules engine ──────────────────────────────────────────
+sys.path.insert(0, DIR)
+from rules_engine import resolve_rules
 
-{rules_section}Carefully analyze the following code diff and identify:
-- Bugs or logic errors
-- Security vulnerabilities
-- Performance issues
-- Code style / maintainability problems
-- Missing null/error checks
-- Any other important issues
+# ── SSL context (skip verification for internal Gerrit) ──────────
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
 
-Return your findings as a JSON array ONLY. No prose before or after. No markdown code fences.
-Each item must have exactly these fields:
-[
-  {{
-    "file": "path/to/file",
-    "line": <integer line number in new file, or 0 if general>,
-    "severity": "error" | "warning" | "suggestion",
-    "comment": "Clear explanation of the issue and how to fix it"
-  }}
-]
+# ── Gerrit REST API helpers ──────────────────────────────────────
+GERRIT_URL = "https://review2.bjitgroup.com:8443"
 
-If there are no issues, return an empty array: []
+def gerrit_api_get(path: str, auth_header: str) -> dict:
+    """GET from Gerrit REST API, strip magic prefix, return JSON."""
+    url = f"{GERRIT_URL}{path}"
+    req = urllib.request.Request(url)
+    if auth_header:
+        req.add_header("Authorization", auth_header)
+    req.add_header("Accept", "application/json")
+    resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=30)
+    body = resp.read().decode("utf-8")
+    # Gerrit prefixes JSON with )]}' to prevent XSSI
+    if body.startswith(")]}'"):
+        body = body[4:].lstrip()
+    return json.loads(body)
 
-CODE DIFF TO REVIEW:
----
+def get_changed_files(change_id: str, auth_header: str) -> list:
+    """Get list of changed files from Gerrit REST API."""
+    data = gerrit_api_get(f"/a/changes/{change_id}/revisions/current/files", auth_header)
+    files = []
+    for path, info in data.items():
+        if path == "/COMMIT_MSG":
+            continue
+        files.append({
+            "path": path,
+            "lines_inserted": info.get("lines_inserted", 0),
+            "lines_deleted": info.get("lines_deleted", 0),
+            "status": info.get("status", "M"),  # M=modified, A=added, D=deleted, R=renamed
+        })
+    return files
+
+def get_file_diff(change_id: str, file_path: str, auth_header: str) -> str:
+    """Get unified diff for a specific file from Gerrit REST API."""
+    encoded_path = urllib.parse.quote(file_path, safe="")
+    data = gerrit_api_get(
+        f"/a/changes/{change_id}/revisions/current/files/{encoded_path}/diff",
+        auth_header
+    )
+    # Convert Gerrit diff JSON to unified diff text
+    lines = []
+    lines.append(f"--- a/{file_path}")
+    lines.append(f"+++ b/{file_path}")
+    for chunk in data.get("content", []):
+        if "ab" in chunk:  # context (unchanged)
+            for line in chunk["ab"]:
+                lines.append(f" {line}")
+        if "a" in chunk:  # removed
+            for line in chunk["a"]:
+                lines.append(f"-{line}")
+        if "b" in chunk:  # added
+            for line in chunk["b"]:
+                lines.append(f"+{line}")
+    return "\n".join(lines)
+
+# ── MCP runtime config ───────────────────────────────────────────
+def write_mcp_config(change_id: str, auth_header: str, project_slug: str = ""):
+    """Write per-review config for the MCP server to read."""
+    import re as _re
+    safe_slug = _re.sub(r"[^a-zA-Z0-9._-]", "_", project_slug) if project_slug else ""
+
+    project_dir = ""
+    if safe_slug:
+        candidate = os.path.join(PROJECTS_DIR, safe_slug, "repo")
+        if os.path.isdir(candidate):
+            project_dir = candidate
+
+    config = {
+        "change_id": change_id,
+        "auth": auth_header,
+        "gerrit_url": GERRIT_URL,
+        "project_dir": project_dir,
+    }
+
+    with open(MCP_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f)
+
+    print(f"[AI Reviewer v3] MCP config: change={change_id}, project_dir={project_dir or '(none)'}")
+    return project_dir
+
+# ── Worker prompt template ───────────────────────────────────────
+WORKER_PROMPT_TEMPLATE = """You are a senior code reviewer. Review this single file change.
+
+File: {file_path}
+Project: {project_slug}
+
+{rules_section}
+
+DIFF:
 {diff}
----
+
+INSTRUCTIONS:
+1. Analyze the diff for real bugs, security issues, or logic errors
+2. If code references components/methods not in this diff, use gerrit_code_search to verify they exist before flagging
+3. Use gerrit_file_read to see surrounding code context if needed
+4. Do NOT flag style, naming, or cosmetic issues
+5. If no real issues found, return []
+
+OUTPUT (strict JSON array only, no prose):
+[{{"file":"{file_path}","line":N,"severity":"error|warning|suggestion","comment":"description","existing_code":"code","suggestion_code":"fixed_code"}}]
 """
 
-RULES_SECTION_TEMPLATE = """PROJECT-SPECIFIC REVIEW RULES (you MUST follow these rules strictly when reviewing):
-{rules_content}
-
-"""
-
-
-def load_project_rules(project_slug: str) -> str:
-    """
-    Load rules for a project. Prefers _compressed.txt if available and fresh.
-    Falls back to raw files, and triggers background compression on first load.
-    """
-    if not project_slug:
-        return ""
-    import re as _re
-    safe_slug = _re.sub(r"[^a-zA-Z0-9._-]", "_", project_slug)
-    project_dir = os.path.join(RULES_DIR, safe_slug)
-    if not os.path.isdir(project_dir):
-        return ""
-
-    compressed_path = os.path.join(project_dir, "_compressed.txt")
-
-    # Check if compressed exists and is fresh
-    raw_files = sorted(
-        f for f in os.listdir(project_dir)
-        if os.path.isfile(os.path.join(project_dir, f)) and not f.startswith("_")
-    )
-    if not raw_files:
-        return ""
-
-    if os.path.exists(compressed_path):
-        latest_raw = max(os.path.getmtime(os.path.join(project_dir, f)) for f in raw_files)
-        if os.path.getmtime(compressed_path) >= latest_raw:
-            with open(compressed_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            print(f"[Rules] Using compressed rules for '{safe_slug}' ({len(content)} chars) ✅")
-            return content
-
-    # No fresh compressed — use raw for this review, but kick off compression in background
-    print(f"[Rules] No compressed cache for '{safe_slug}' — using raw rules, queuing compression...")
-    threading.Thread(target=compress_and_save_rules, args=(project_slug,), daemon=True).start()
-
-    parts = []
-    for fname in raw_files:
-        fpath = os.path.join(project_dir, fname)
-        try:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read().strip()
-            if content:
-                parts.append(f"--- {fname} ---\n{content}")
-        except Exception as e:
-            print(f"[AI Reviewer] Could not read rules file {fname}: {e}")
-
-    if not parts:
-        return ""
-    return "\n\n".join(parts)
-
-
-COMPRESS_PROMPT = """You are a technical writer. Below are code review rules for a software project.
-Compress them into the shortest possible directive list — keep every actionable rule, remove all
-verbose explanations, examples, and redundant wording. Output ONLY the compressed rules as a
-numbered list. No intro, no outro.
-
-RULES TO COMPRESS:
-{rules_content}
-"""
-
-def compress_and_save_rules(project_slug: str) -> str:
-    """
-    Run a one-time Hermes call to compress the raw rules for a project.
-    Saves the result to rules/<slug>/_compressed.txt and returns it.
-    Skips compression if _compressed.txt is already newer than all raw rule files.
-    """
-    import re as _re
-    safe_slug = _re.sub(r"[^a-zA-Z0-9._-]", "_", project_slug)
-    project_dir = os.path.join(RULES_DIR, safe_slug)
-    compressed_path = os.path.join(project_dir, "_compressed.txt")
-
-    # Gather raw rule files (exclude _compressed.txt itself)
-    raw_files = sorted(
-        f for f in os.listdir(project_dir)
-        if os.path.isfile(os.path.join(project_dir, f)) and not f.startswith("_")
-    )
-    if not raw_files:
-        return ""
-
-    # Check freshness — skip if compressed is already up to date
-    if os.path.exists(compressed_path):
-        compressed_mtime = os.path.getmtime(compressed_path)
-        latest_raw = max(os.path.getmtime(os.path.join(project_dir, f)) for f in raw_files)
-        if compressed_mtime >= latest_raw:
-            print(f"[Rules] Compressed cache is fresh for '{safe_slug}', skipping re-compression")
-            with open(compressed_path, "r", encoding="utf-8") as f:
-                return f.read()
-
-    # Build combined raw text
-    raw_parts = []
-    for fname in raw_files:
-        with open(os.path.join(project_dir, fname), "r", encoding="utf-8", errors="replace") as f:
-            raw_parts.append(f.read().strip())
-    raw_combined = "\n\n".join(raw_parts)
-
-    print(f"[Rules] Compressing rules for '{safe_slug}' ({len(raw_combined)} chars) via Hermes...")
-    prompt = COMPRESS_PROMPT.format(rules_content=raw_combined)
-
-    try:
-        result = subprocess.run(
-            [HERMES_BIN, "-z", prompt],
-            capture_output=True, text=True, timeout=120,
-            encoding="utf-8", errors="replace"
-        )
-        compressed = result.stdout.strip()
-        if not compressed:
-            print("[Rules] Compression returned empty output — using raw rules")
-            return raw_combined
-    except Exception as e:
-        print(f"[Rules] Compression failed ({e}) — using raw rules")
-        return raw_combined
-
-    # Save compressed
-    with open(compressed_path, "w", encoding="utf-8") as f:
-        f.write(compressed)
-    ratio = round((1 - len(compressed) / max(len(raw_combined), 1)) * 100)
-    print(f"[Rules] Compression done: {len(raw_combined)} → {len(compressed)} chars ({ratio}% reduction)")
-
-    # Also create/update a Hermes skill for this project
-    _write_hermes_skill(safe_slug, compressed)
-
-    return compressed
-
-
-def _write_hermes_skill(safe_slug: str, compressed_rules: str):
-    """Write a SKILL.md into Hermes skills/gerrit/ so Hermes can load rules natively."""
-    skill_name = f"gerrit-rules-{safe_slug}"
-    skill_dir  = os.path.join(SKILLS_DIR, skill_name)
-    os.makedirs(skill_dir, exist_ok=True)
-    skill_path = os.path.join(skill_dir, "SKILL.md")
-
-    skill_md = f"""---
-name: {skill_name}
-description: "Gerrit code review rules for project '{safe_slug}'. Load this skill before reviewing diffs."
-tags: [gerrit, code-review, rules, {safe_slug}]
----
-
-# Code Review Rules — {safe_slug}
-
-These rules MUST be applied when reviewing code diffs for this project.
-
-{compressed_rules}
-"""
-    with open(skill_path, "w", encoding="utf-8") as f:
-        f.write(skill_md)
-    print(f"[Rules] Hermes skill written: skills/gerrit/{skill_name}/SKILL.md")
-
-
-# Token cost estimation (Claude Sonnet approximate pricing)
-INPUT_COST_PER_1M       = 3.00    # USD per 1M input tokens
-OUTPUT_COST_PER_1M      = 15.00   # USD per 1M output tokens
-CACHE_WRITE_COST_PER_1M = 3.75    # USD per 1M tokens written to cache
-CACHE_READ_COST_PER_1M  = 0.30    # USD per 1M tokens read from cache
-
-import hashlib
-_prompt_cache: dict[str, int] = {}  # prompt_hash -> hit count
+# ── Token cost estimation ────────────────────────────────────────
+INPUT_COST_PER_1M  = 3.00
+OUTPUT_COST_PER_1M = 15.00
 
 def estimate_tokens(text: str) -> int:
-    """Rough token count: ~4 chars per token."""
     return max(1, len(text) // 4)
 
-def estimate_cost(input_tokens: int, output_tokens: int,
-                  cache_hit: bool = False) -> float:
-    if cache_hit:
-        return (input_tokens  / 1_000_000) * CACHE_READ_COST_PER_1M + \
-               (output_tokens / 1_000_000) * OUTPUT_COST_PER_1M
-    return (input_tokens  / 1_000_000) * INPUT_COST_PER_1M + \
-           (output_tokens / 1_000_000) * OUTPUT_COST_PER_1M
+# ── Orchestrator: parallel review ────────────────────────────────
+MAX_WORKERS = 4
+WORKER_TIMEOUT = 180  # seconds per worker
 
-def check_cache(prompt: str) -> tuple[bool, str]:
-    """Return (cache_hit, prompt_hash). Registers the hash on first call."""
-    h = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    if h in _prompt_cache:
-        _prompt_cache[h] += 1
-        return True, h
-    _prompt_cache[h] = 0
-    return False, h
+def _review_single_file(file_path: str, diff: str, rules_section: str,
+                        project_slug: str, env: dict, worker_id: int) -> list:
+    """Worker: review one file using a hermes subprocess."""
+    import time as _t
 
-
-def review(change_id: str, diff_text: str, filenames: list, project_slug: str = "") -> list:
-    """
-    Write diff to temp file, invoke Hermes, return list of comment dicts.
-    If a Hermes skill exists for this project, references it by name (no rules text in prompt).
-    Otherwise falls back to loading compressed/raw rules inline.
-    """
-    # 1. Determine rules strategy
-    import re as _re
-    safe_slug   = _re.sub(r"[^a-zA-Z0-9._-]", "_", project_slug) if project_slug else ""
-    skill_name  = f"gerrit-rules-{safe_slug}" if safe_slug else ""
-    skill_path  = os.path.join(SKILLS_DIR, skill_name, "SKILL.md") if skill_name else ""
-    skill_exists = skill_name and os.path.exists(skill_path)
-
-    if skill_exists:
-        # Skill exists — just reference it; Hermes loads it internally (saves input tokens)
-        rules_section = (
-            f"IMPORTANT: Before reviewing, load and strictly follow the skill named "
-            f"'{skill_name}' which contains the project-specific code review rules.\n\n"
-        )
-        print(f"[AI Reviewer] Using Hermes skill '{skill_name}' — rules NOT injected into prompt ✅ (token saving)")
-    else:
-        # No skill yet — fall back to inline rules (compressed if available, else raw)
-        rules_text = load_project_rules(project_slug)
-        if rules_text:
-            rules_section = RULES_SECTION_TEMPLATE.format(rules_content=rules_text)
-            rules_source = "raw" if rules_text.startswith("---") else "compressed"
-            print(f"[AI Reviewer] Inline rules for '{project_slug}' ({len(rules_text)} chars, {rules_source}) — skill not ready yet")
-        else:
-            rules_section = ""
-            print(f"[AI Reviewer] No rules found for '{project_slug}' — using default prompt")
-
-    # 2. Build prompt
-    prompt = REVIEW_PROMPT_TEMPLATE.format(
+    prompt = WORKER_PROMPT_TEMPLATE.format(
+        file_path=file_path,
+        project_slug=project_slug or "unknown",
         rules_section=rules_section,
-        diff=diff_text[:12000]  # cap at 12k chars
+        diff=diff[:15000],  # cap per-file diff at 15K chars
     )
 
-    # Check prompt cache (same diff+rules combo seen before?)
-    cache_hit, prompt_hash = check_cache(prompt)
-    cache_label = f"✅ CACHE HIT  (hash={prompt_hash}, seen {_prompt_cache[prompt_hash]}x before)" \
-                  if cache_hit else f"❌ CACHE MISS (hash={prompt_hash}, first time)"
-    print(f"[AI Reviewer] {cache_label}")
+    stdout_file = os.path.join(TEMP_DIR, f"worker_{worker_id}_stdout.txt")
+    stderr_file = os.path.join(TEMP_DIR, f"worker_{worker_id}_stderr.txt")
+    cmd = [HERMES_BIN, "-z", prompt, "-s", "gerrit-review", "--yolo", "--cli"]
 
-    # 3. Write prompt to temp file
-    temp_path = os.path.join(TEMP_DIR, f"diff_{change_id}.txt")
-    with open(temp_path, "w", encoding="utf-8") as f:
-        f.write(prompt)
-
-    print(f"[AI Reviewer] Wrote diff to {temp_path}")
-    print(f"[AI Reviewer] Invoking Hermes ({HERMES_BIN})...")
-
-    # 2. Invoke Hermes
+    t0 = _t.time()
     try:
-        result = subprocess.run(
-            [HERMES_BIN, "-z", prompt],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            encoding="utf-8",
-            errors="replace"
-        )
-        raw_output = result.stdout.strip()
-        stderr_out = result.stderr.strip()
+        with open(stdout_file, "w", encoding="utf-8", errors="replace") as f_out, \
+             open(stderr_file, "w", encoding="utf-8", errors="replace") as f_err:
+            subprocess.run(cmd, stdout=f_out, stderr=f_err, timeout=WORKER_TIMEOUT, env=env)
 
-        if stderr_out:
-            print(f"[AI Reviewer] Hermes stderr: {stderr_out[:500]}")
+        with open(stdout_file, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read().strip()
 
-        print(f"[AI Reviewer] Hermes raw output (first 500 chars): {raw_output[:500]}")
+        comments = parse_comments(raw)
+        elapsed = _t.time() - t0
+        print(f"[Worker {worker_id}] {file_path}: {len(comments)} comments in {elapsed:.0f}s")
+        sys.stdout.flush()
+        return comments
 
     except subprocess.TimeoutExpired:
-        raise RuntimeError("Hermes timed out after 180 seconds")
-    except FileNotFoundError:
-        raise RuntimeError(f"Hermes binary not found at: {HERMES_BIN}. Make sure 'hermes' is on your PATH.")
+        print(f"[Worker {worker_id}] {file_path}: TIMEOUT ({WORKER_TIMEOUT}s)")
+        return []
+    except Exception as e:
+        print(f"[Worker {worker_id}] {file_path}: ERROR: {e}")
+        return []
+    finally:
+        for f in (stdout_file, stderr_file):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
 
-    # 3. Parse JSON from output
-    comments = parse_comments(raw_output)
 
-    # 4. Token & cost summary
-    input_tokens  = estimate_tokens(prompt)
-    output_tokens = estimate_tokens(raw_output)
-    cost_usd      = estimate_cost(input_tokens, output_tokens, cache_hit=cache_hit)
-    token_summary = {
-        "input_tokens":  input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens":  input_tokens + output_tokens,
-        "estimated_cost_usd": round(cost_usd, 6),
-        "cache_hit":   cache_hit,
-        "prompt_hash": prompt_hash,
-        "cache_hit_count": _prompt_cache[prompt_hash],
-        "rules_strategy": "skill-ref" if skill_exists else ("inline-compressed" if (not skill_exists and project_slug) else "none"),
-    }
-    cache_tag = f"✅ CACHE HIT  (×{_prompt_cache[prompt_hash]})" if cache_hit else "❌ CACHE MISS"
-    print(
-        f"[AI Reviewer] ── Token Usage ──────────────────────────────\n"
-        f"  Cache status  : {cache_tag}\n"
-        f"  Input  tokens : {input_tokens:,}\n"
-        f"  Output tokens : {output_tokens:,}\n"
-        f"  Total  tokens : {input_tokens + output_tokens:,}\n"
-        f"  Est. cost     : ${cost_usd:.6f} USD  ({'cache read' if cache_hit else 'full'} rate)\n"
-        f"[AI Reviewer] ─────────────────────────────────────────────"
-    )
+def review(change_id: str, diff_text: str, filenames: list, project_slug: str = "",
+           auth_header: str = "") -> tuple[list, dict]:
+    """
+    Review a Gerrit change using parallel workers (one per file).
 
-    # 5. Clean up temp file
+    Returns: (comments_list, token_summary_dict)
+    """
+    import time as _t
+    import concurrent.futures
+
+    _t0 = _t.time()
+
+    # 1. Write MCP runtime config (for workers to use)
+    project_dir = write_mcp_config(change_id, auth_header, project_slug)
+
+    # 2. Resolve rules
+    rules = resolve_rules(filenames, project_slug)
+    rules_section = f"REVIEW RULES:\n{rules}" if rules else ""
+    if rules:
+        print(f"[AI Reviewer v3] Rules loaded: {len(rules)} chars")
+    else:
+        print(f"[AI Reviewer v3] No project rules — using defaults")
+
+    # 3. Get file list via Gerrit REST API (no hermes needed)
     try:
-        os.remove(temp_path)
-    except Exception:
-        pass
+        files = get_changed_files(change_id, auth_header)
+    except Exception as e:
+        print(f"[AI Reviewer v3] Failed to get file list: {e}")
+        return [], {"error": str(e)}
 
-    return comments, token_summary
+    files_to_review = [f for f in files if f["lines_inserted"] + f["lines_deleted"] > 0]
+    print(f"[AI Reviewer v3] {len(files)} files changed, {len(files_to_review)} with modifications")
+
+    # 4. Get per-file diffs via Gerrit REST API (no hermes needed)
+    file_diffs = {}
+    for f in files_to_review:
+        try:
+            diff = get_file_diff(change_id, f["path"], auth_header)
+            if diff.strip():
+                file_diffs[f["path"]] = diff
+                print(f"[AI Reviewer v3]   {f['path']}: +{f['lines_inserted']}/-{f['lines_deleted']} ({len(diff)} chars diff)")
+        except Exception as e:
+            print(f"[AI Reviewer v3]   {f['path']}: FAILED: {e}")
+
+    if not file_diffs:
+        print(f"[AI Reviewer v3] No diffs to review")
+        return [], {"files_reviewed": 0}
+
+    # 5. Spawn parallel workers
+    env = os.environ.copy()
+    env["GERRIT_MCP_CONFIG"] = MCP_CONFIG_PATH
+
+    num_workers = min(MAX_WORKERS, len(file_diffs))
+    print(f"[AI Reviewer v3] Spawning {num_workers} workers for {len(file_diffs)} files...")
+    sys.stdout.flush()
+
+    all_comments = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {}
+        for i, (path, diff) in enumerate(file_diffs.items()):
+            worker_id = i + 1
+            futures[executor.submit(
+                _review_single_file, path, diff, rules_section, project_slug, env, worker_id
+            )] = path
+
+        for future in concurrent.futures.as_completed(futures):
+            path = futures[future]
+            try:
+                comments = future.result()
+                all_comments.extend(comments)
+            except Exception as e:
+                print(f"[AI Reviewer v3] Worker exception for {path}: {e}")
+
+    # 6. Deduplicate by (file, line)
+    seen = set()
+    deduped = []
+    for c in all_comments:
+        key = (c.get("file", ""), c.get("line", 0))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+
+    elapsed = _t.time() - _t0
+
+    # 7. Token summary
+    total_diff_chars = sum(len(d) for d in file_diffs.values())
+    token_summary = {
+        "input_tokens": estimate_tokens(rules_section) * len(file_diffs),
+        "output_tokens": sum(estimate_tokens(json.dumps(c)) for c in deduped),
+        "total_tokens": estimate_tokens(rules_section) * len(file_diffs) + sum(estimate_tokens(json.dumps(c)) for c in deduped),
+        "estimated_cost_usd": 0.0,
+        "files_reviewed": len(file_diffs),
+        "workers_used": num_workers,
+        "elapsed_seconds": round(elapsed),
+        "rules_strategy": "orchestrator-parallel",
+        "has_mcp_tools": True,
+    }
+
+    print(
+        f"[AI Reviewer v3] ── Review Summary ──────────────────────────\n"
+        f"  Files reviewed : {len(file_diffs)}\n"
+        f"  Workers used   : {num_workers}\n"
+        f"  Comments found : {len(deduped)}\n"
+        f"  Total time     : {elapsed:.0f}s\n"
+        f"[AI Reviewer v3] ─────────────────────────────────────────────"
+    )
+    sys.stdout.flush()
+
+    return deduped, token_summary
 
 
+# ── JSON parsing ─────────────────────────────────────────────────
 def parse_comments(raw: str) -> list:
-    """
-    Extract JSON array from Hermes output.
-    Handles: clean JSON, JSON inside markdown fences, or JSON embedded in prose.
-    """
+    """Extract JSON array from Hermes output."""
     if not raw:
         return []
 
-    # Try direct parse first
+    # Direct parse
     try:
         data = json.loads(raw)
         if isinstance(data, list):
@@ -393,7 +353,7 @@ def parse_comments(raw: str) -> list:
     except Exception:
         pass
 
-    # Try extracting from markdown code fence
+    # Markdown code fence
     fence_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw, re.DOTALL)
     if fence_match:
         try:
@@ -403,23 +363,36 @@ def parse_comments(raw: str) -> list:
         except Exception:
             pass
 
-    # Try finding a JSON array anywhere in the output
-    array_match = re.search(r"(\[.*\])", raw, re.DOTALL)
-    if array_match:
-        try:
-            data = json.loads(array_match.group(1))
-            if isinstance(data, list):
-                return normalize(data)
-        except Exception:
-            pass
+    # Bracket-counting: find all valid JSON arrays, return the longest
+    arrays = []
+    i = 0
+    while i < len(raw):
+        if raw[i] == '[':
+            depth = 0
+            j = i
+            while j < len(raw):
+                if raw[j] == '[':
+                    depth += 1
+                elif raw[j] == ']':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = raw[i:j+1]
+                        try:
+                            data = json.loads(candidate)
+                            if isinstance(data, list) and len(data) > 0:
+                                arrays.append(data)
+                        except Exception:
+                            pass
+                        break
+                j += 1
+        i += 1
 
-    # Fallback: return a single comment with raw output
-    return [{
-        "file": "general",
-        "line": 0,
-        "severity": "suggestion",
-        "comment": f"AI Review output (could not parse as JSON):\n\n{raw[:2000]}"
-    }]
+    if arrays:
+        best = max(arrays, key=len)
+        return normalize(best)
+
+    # No JSON found — return empty (don't pollute with prose)
+    return []
 
 
 def normalize(items: list) -> list:
@@ -432,22 +405,19 @@ def normalize(items: list) -> list:
             "file": str(item.get("file", "general")),
             "line": int(item.get("line", 0)) if str(item.get("line", "0")).isdigit() else 0,
             "severity": item.get("severity", "suggestion") if item.get("severity") in ("error", "warning", "suggestion") else "suggestion",
-            "comment": str(item.get("comment", ""))
+            "comment": str(item.get("comment", "")),
+            "existing_code": str(item.get("existing_code", "")),
+            "suggestion_code": str(item.get("suggestion_code", "")),
         })
     return result
 
 
 if __name__ == "__main__":
-    # Quick test
-    test_diff = """
---- a/src/Main.java
-+++ b/src/Main.java
-@@ -10,6 +10,10 @@
-     public static void main(String[] args) {
-+        String input = args[0];
-+        int value = Integer.parseInt(input);
-+        System.out.println(100 / value);
-     }
-"""
-    comments = review("test123", test_diff, ["src/Main.java"])
-    print(json.dumps(comments, indent=2))
+    # Quick test: get file list for a known change
+    import sys
+    change_id = sys.argv[1] if len(sys.argv) > 1 else "198601"
+    auth = "Basic c2FpZnVsLmhvcXVlOmtvbGxvbDM2"
+    files = get_changed_files(change_id, auth)
+    print(f"\nChanged files in {change_id}:")
+    for f in files:
+        print(f"  {f['path']}: +{f['lines_inserted']}/-{f['lines_deleted']}")
