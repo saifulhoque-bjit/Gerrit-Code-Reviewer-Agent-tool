@@ -202,6 +202,10 @@ class Handler(BaseHTTPRequestHandler):
             self._proxy(parsed, "POST")
         elif path.startswith("/ai-review/start/"):
             self._start_ai_review(path)
+        elif path.startswith("/ai-review/proceed-anyway/"):
+            self._ai_review_proceed_anyway(path)
+        elif path.startswith("/ai-review/reindex-and-retry/"):
+            self._ai_review_reindex_retry(path)
         elif path.startswith("/rules/upload"):
             self._rules_upload()
         elif path.startswith("/rules/clear/"):
@@ -298,6 +302,22 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[AI Review] ▶ run_review START for {poll_key} (gerrit={gerrit_change_id}) at {time.strftime('%H:%M:%S')}", flush=True)
             try:
                 comments, token_summary = do_ai_review(gerrit_change_id, diff_text, filenames, auth, project_slug)
+
+                # Check for branch mismatch — pause review
+                if token_summary.get("branch_mismatch"):
+                    review_results[poll_key] = {
+                        "branch_mismatch": True,
+                        "indexed_branch": token_summary.get("indexed_branch", ""),
+                        "target_branch": token_summary.get("target_branch", ""),
+                        "project_slug": token_summary.get("project_slug", ""),
+                        "change_id": token_summary.get("change_id", gerrit_change_id),
+                        "auth": auth,
+                    }
+                    review_status[poll_key] = "branch_mismatch"
+                    print(f"[AI Review] ⏸ PAUSED for {poll_key} — branch mismatch: indexed='{token_summary.get('indexed_branch')}' vs target='{token_summary.get('target_branch')}'", flush=True)
+                    print(f"[AI Review] ⏸ Auth stored: {'yes' if auth else 'EMPTY'} (len={len(auth)})", flush=True)
+                    return
+
                 review_results[poll_key] = {"comments": comments, "token_summary": token_summary}
                 review_status[poll_key] = "done"
                 files_n = token_summary.get("files_reviewed", "?")
@@ -314,7 +334,109 @@ class Handler(BaseHTTPRequestHandler):
         t = threading.Thread(target=run_review, daemon=True)
         t.start()
 
-    # ── Rules endpoints ───────────────────────────────────────────
+    def _ai_review_proceed_anyway(self, path):
+        """Re-trigger review with force=True, skipping branch mismatch check."""
+        parts = path.strip("/").split("/")
+        poll_key = parts[-1] if len(parts) >= 3 else None
+        if not poll_key or poll_key not in review_results:
+            self.send_json({"error": "Unknown review"}, 400)
+            return
+
+        result = review_results[poll_key]
+        if not result or not result.get("branch_mismatch"):
+            self.send_json({"error": "No branch mismatch to proceed past"}, 400)
+            return
+
+        # Re-trigger with force
+        change_id = result.get("change_id", "")
+        project_slug = result.get("project_slug", "")
+        gerrit_change_id = change_id.split("_")[-1] if "_" in change_id else change_id
+        auth = result.get("auth", "")
+
+        review_status[poll_key] = "pending"
+        review_results[poll_key] = None
+        self.send_json({"status": "started", "change_id": poll_key})
+
+        def run_forced():
+            import ai_reviewer
+            try:
+                # Re-fetch diff from Gerrit
+                files = ai_reviewer.get_changed_files(gerrit_change_id, auth)
+                filenames = [f["path"] for f in files]
+                diff_text = ""  # not used in v3 orchestrator — diffs fetched per-file
+
+                comments, token_summary = do_ai_review(
+                    gerrit_change_id, diff_text, filenames, auth, project_slug, force=True
+                )
+                review_results[poll_key] = {"comments": comments, "token_summary": token_summary}
+                review_status[poll_key] = "done"
+                print(f"[AI Review] ✓ DONE (forced) for {poll_key} — {len(comments)} comments", flush=True)
+            except Exception as ex:
+                import traceback
+                traceback.print_exc()
+                review_results[poll_key] = {"error": str(ex)}
+                review_status[poll_key] = "error"
+
+        threading.Thread(target=run_forced, daemon=True).start()
+
+    def _ai_review_reindex_retry(self, path):
+        """Checkout correct branch, re-index, then retry review with force."""
+        parts = path.strip("/").split("/")
+        poll_key = parts[-1] if len(parts) >= 3 else None
+        if not poll_key or poll_key not in review_results:
+            self.send_json({"error": "Unknown review"}, 400)
+            return
+
+        result = review_results[poll_key]
+        if not result or not result.get("branch_mismatch"):
+            self.send_json({"error": "No branch mismatch to fix"}, 400)
+            return
+
+        change_id = result.get("change_id", "")
+        project_slug = result.get("project_slug", "")
+        target_branch = result.get("target_branch", "")
+        gerrit_change_id = change_id.split("_")[-1] if "_" in change_id else change_id
+        auth = result.get("auth", "")
+
+        # Find project dir
+        safe_slug = re.sub(r"[^a-zA-Z0-9._-]", "_", project_slug) if project_slug else ""
+        project_dir = os.path.join(PROJECTS_DIR, safe_slug, "repo") if safe_slug else ""
+
+        review_status[poll_key] = "pending"
+        review_results[poll_key] = None
+        self.send_json({"status": "reindexing", "change_id": poll_key, "target_branch": target_branch})
+
+        def run_reindex_retry():
+            import ai_reviewer
+            try:
+                # 1. Checkout correct branch
+                print(f"[AI Review] Checking out '{target_branch}'...", flush=True)
+                ai_reviewer.ensure_correct_branch(project_dir, target_branch)
+
+                # 2. Re-index
+                print(f"[AI Review] Re-indexing on '{target_branch}'...", flush=True)
+                _run_index(safe_slug, project_dir)
+
+                # 3. Retry review with force
+                print(f"[AI Review] Retrying review after re-index...", flush=True)
+                files = ai_reviewer.get_changed_files(gerrit_change_id, auth)
+                filenames = [f["path"] for f in files]
+                diff_text = ""
+
+                comments, token_summary = do_ai_review(
+                    gerrit_change_id, diff_text, filenames, auth, project_slug, force=True
+                )
+                review_results[poll_key] = {"comments": comments, "token_summary": token_summary}
+                review_status[poll_key] = "done"
+                print(f"[AI Review] ✓ DONE (re-indexed) for {poll_key} — {len(comments)} comments", flush=True)
+            except Exception as ex:
+                import traceback
+                traceback.print_exc()
+                review_results[poll_key] = {"error": str(ex)}
+                review_status[poll_key] = "error"
+
+        threading.Thread(target=run_reindex_retry, daemon=True).start()
+
     def _safe_slug(self, slug):
         """Strip path traversal attempts — only allow safe chars."""
         return re.sub(r"[^a-zA-Z0-9._-]", "_", slug) or "unknown"
@@ -1072,16 +1194,10 @@ def _run_index(slug, repo_dir):
         # Find codebase-memory-mcp binary
         cbmcp = shutil.which("codebase-memory-mcp")
         if not cbmcp:
-            for candidate in [
-                r"D:\tools\codebase-memory-mcp.exe",
-                os.path.expanduser("~/.local/bin/codebase-memory-mcp"),
-            ]:
-                if os.path.isfile(candidate):
-                    cbmcp = candidate
-                    break
+            cbmcp = shutil.which("codebase-memory-mcp.exe")
 
         if not cbmcp:
-            raise RuntimeError("codebase-memory-mcp binary not found at D:\\tools\\codebase-memory-mcp.exe")
+            raise RuntimeError("codebase-memory-mcp not found. Install it globally first.")
 
         print(f"[Index]   binary: {cbmcp}")
 
@@ -1117,8 +1233,20 @@ def _run_index(slug, repo_dir):
 
         elapsed = int(time.time() - start_time)
         if proc.returncode == 0:
-            print(f"[Index] ✅ Complete for '{slug}' in {elapsed}s")
+            # Track which branch was indexed
+            indexed_branch = ""
+            try:
+                br = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True, text=True, timeout=10,
+                    cwd=repo_dir, encoding="utf-8", errors="replace"
+                )
+                indexed_branch = br.stdout.strip()
+            except Exception:
+                pass
+            print(f"[Index] ✅ Complete for '{slug}' in {elapsed}s (branch='{indexed_branch}')")
             project_status[slug]["indexed"] = True
+            project_status[slug]["indexed_branch"] = indexed_branch
         else:
             err = last_line or f"Indexing failed (exit code {proc.returncode})"
             print(f"[Index] ❌ Failed for '{slug}' after {elapsed}s — {err}")
@@ -1149,10 +1277,10 @@ def _run_index(slug, repo_dir):
 
 
 
-def do_ai_review(change_id, diff_text, filenames, auth_header, project_slug=""):
+def do_ai_review(change_id, diff_text, filenames, auth_header, project_slug="", force=False):
     """Write diff to temp file, call Hermes, parse JSON response."""
     import ai_reviewer
-    return ai_reviewer.review(change_id, diff_text, filenames, project_slug, auth_header)
+    return ai_reviewer.review(change_id, diff_text, filenames, project_slug, auth_header, force=force)
 
 
 if __name__ == "__main__":

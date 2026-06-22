@@ -235,6 +235,31 @@
 
 <div id="toastContainer" class="toast-container"></div>
 
+<!-- Branch mismatch dialog -->
+<div id="branchDialog" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <span style="font-size:24px">🔀</span>
+      <h3 style="margin:0;font-size:16px;font-weight:700">Branch Mismatch</h3>
+    </div>
+    <p style="color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 16px">
+      This change is on branch <code id="dialogTargetBranch" style="background:var(--bg3);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:12px"></code>
+      but the codebase was indexed on branch <code id="dialogIndexedBranch" style="background:var(--bg3);color:var(--accent2);padding:2px 6px;border-radius:4px;font-size:12px"></code>.
+    </p>
+    <p style="color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 20px">
+      Code search results may be inaccurate. What would you like to do?
+    </p>
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button id="dialogSkip" style="background:var(--bg3);color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:10px 20px;font-size:13px;cursor:pointer;transition:background 0.15s">
+        ⏭ Skip & Review Anyway
+      </button>
+      <button id="dialogReindex" style="background:var(--accent);color:white;border:none;border-radius:8px;padding:10px 20px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity 0.15s">
+        🔄 Re-index & Retry
+      </button>
+    </div>
+  </div>
+</div>
+
 <script>
 const PROXY = 'http://localhost:7474/api';
 let currentFile = null;
@@ -258,6 +283,8 @@ const changeId  = sessionStorage.getItem('current_change_id');
 const changeNum = sessionStorage.getItem('current_change_num');
 const project   = sessionStorage.getItem('current_project');
 const subject   = sessionStorage.getItem('current_subject');
+const branch    = sessionStorage.getItem('current_branch') || '';
+const author    = sessionStorage.getItem('current_author') || '';
 
 function showToast(msg, type='success') {
   const c = document.getElementById('toastContainer');
@@ -273,12 +300,35 @@ function escHtml(s) {
 }
 function escAttr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 
+// ── Branch mismatch dialog ─────────────────────────────────────
+function showBranchDialog(targetBranch, indexedBranch) {
+  return new Promise((resolve) => {
+    const dlg = document.getElementById('branchDialog');
+    document.getElementById('dialogTargetBranch').textContent = targetBranch;
+    document.getElementById('dialogIndexedBranch').textContent = indexedBranch;
+    dlg.style.display = 'flex';
+
+    const cleanup = () => {
+      dlg.style.display = 'none';
+      document.getElementById('dialogSkip').onclick = null;
+      document.getElementById('dialogReindex').onclick = null;
+    };
+
+    document.getElementById('dialogSkip').onclick = () => { cleanup(); resolve('skip'); };
+    document.getElementById('dialogReindex').onclick = () => { cleanup(); resolve('reindex'); };
+  });
+}
+
 // ── Init ──────────────────────────────────────────────────────
 async function init() {
   if (!changeId) { window.location.href = 'changes.html'; return; }
   document.getElementById('userBadge').textContent = sessionStorage.getItem('display_name') || '?';
   document.getElementById('commitSubject').textContent = subject || 'Change #' + changeNum;
-  document.getElementById('commitMeta').textContent = `Project: ${project} · Change #${changeNum}`;
+  const metaParts = [`Project: ${project}`];
+  if (author) metaParts.push(`Author: ${author}`);
+  if (branch) metaParts.push(`Branch: ${branch}`);
+  metaParts.push(`Change #${changeNum}`);
+  document.getElementById('commitMeta').textContent = metaParts.join(' · ');
   await loadFiles(getAuth());
 }
 
@@ -600,6 +650,35 @@ async function pollReview(pollKey, scope, isFile) {
         const errMsg = data.error || 'Check server logs for details.';
         showToast('Review error: ' + errMsg, 'error');
         console.error('[AI Review Error]', errMsg);
+      } else if (data.status === 'branch_mismatch') {
+        resetBtn(scope, isFile);
+        const result = data.result || {};
+        const indexedBranch = result.indexed_branch || '?';
+        const targetBranch = result.target_branch || '?';
+        const projSlug = result.project_slug || '';
+
+        // Show custom branch mismatch dialog
+        const choice = await showBranchDialog(targetBranch, indexedBranch);
+
+        if (choice === 'reindex') {
+          showToast(`Re-indexing on "${targetBranch}"... This may take a few minutes.`, 'info');
+          setBtnRunning(scope, isFile);
+          try {
+            const resp = await fetch(`/ai-review/reindex-and-retry/${pollKey}`, { method: 'POST' });
+            const d = await resp.json();
+            if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
+            pollReview(pollKey, scope, isFile);
+          } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        } else {
+          showToast('Proceeding with review (results may be less accurate)...', 'info');
+          setBtnRunning(scope, isFile);
+          try {
+            const resp = await fetch(`/ai-review/proceed-anyway/${pollKey}`, { method: 'POST' });
+            const d = await resp.json();
+            if (d.error) { showToast('Error: ' + d.error, 'error'); return; }
+            pollReview(pollKey, scope, isFile);
+          } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        }
       } else if (Date.now() - start > 900000) {  // 15 min client-side cap
         resetBtn(scope, isFile);
         showToast('Review timed out after 15 minutes.', 'error');
@@ -625,6 +704,17 @@ function resetBtn(scope, isFile) {
     const btn = document.getElementById('aiReviewBtn');
     btn.disabled = false;
     btn.innerHTML = '🤖 Review Commit';
+  }
+}
+
+function setBtnRunning(scope, isFile) {
+  if (isFile) {
+    const btn = document.getElementById('frb-' + safeId(scope));
+    if (btn) { btn.classList.add('running'); btn.textContent = '⏳'; btn.disabled = true; }
+  } else {
+    const btn = document.getElementById('aiReviewBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Reviewing…';
   }
 }
 

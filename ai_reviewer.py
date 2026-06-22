@@ -125,6 +125,64 @@ def get_file_diff(change_id: str, file_path: str, auth_header: str) -> str:
                 lines.append(f"+{line}")
     return "\n".join(lines)
 
+def get_change_detail(change_id: str, auth_header: str) -> dict:
+    """Get change detail including branch name."""
+    return gerrit_api_get(f"/a/changes/{change_id}/detail", auth_header)
+
+def ensure_correct_branch(project_dir: str, target_branch: str) -> bool:
+    """Checkout the local clone to the target branch if needed.
+    Returns True if already on correct branch, False if checkout was needed."""
+    if not project_dir or not os.path.isdir(project_dir):
+        return True  # no local clone, nothing to do
+
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=10,
+            cwd=project_dir, encoding="utf-8", errors="replace"
+        )
+        current_branch = result.stdout.strip()
+
+        if current_branch == target_branch:
+            return True  # already on correct branch
+
+        print(f"[AI Reviewer v3] Branch mismatch: local='{current_branch}', target='{target_branch}'")
+        print(f"[AI Reviewer v3] Checking out '{target_branch}'...")
+
+        # Try checkout
+        result = subprocess.run(
+            ["git", "checkout", target_branch],
+            capture_output=True, text=True, timeout=60,
+            cwd=project_dir, encoding="utf-8", errors="replace"
+        )
+
+        if result.returncode == 0:
+            print(f"[AI Reviewer v3] Checked out '{target_branch}' successfully")
+            return False
+        else:
+            # Try fetch + checkout
+            print(f"[AI Reviewer v3] Checkout failed, fetching branch from remote...")
+            subprocess.run(
+                ["git", "fetch", "origin", target_branch],
+                capture_output=True, text=True, timeout=120,
+                cwd=project_dir, encoding="utf-8", errors="replace"
+            )
+            result = subprocess.run(
+                ["git", "checkout", "-b", target_branch, f"origin/{target_branch}"],
+                capture_output=True, text=True, timeout=60,
+                cwd=project_dir, encoding="utf-8", errors="replace"
+            )
+            if result.returncode == 0:
+                print(f"[AI Reviewer v3] Fetched and checked out '{target_branch}'")
+                return False
+            else:
+                print(f"[AI Reviewer v3] ⚠ Failed to checkout '{target_branch}': {result.stderr[:200]}")
+                return False
+
+    except Exception as e:
+        print(f"[AI Reviewer v3] ⚠ Branch check failed: {e}")
+        return True
+
 # ── MCP runtime config ───────────────────────────────────────────
 def write_mcp_config(change_id: str, auth_header: str, project_slug: str = ""):
     """Write per-review config for the MCP server to read."""
@@ -229,7 +287,7 @@ def _review_single_file(file_path: str, diff: str, rules_section: str,
 
 
 def review(change_id: str, diff_text: str, filenames: list, project_slug: str = "",
-           auth_header: str = "") -> tuple[list, dict]:
+           auth_header: str = "", force: bool = False) -> tuple[list, dict]:
     """
     Review a Gerrit change using parallel workers (one per file).
 
@@ -251,12 +309,54 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
     else:
         print(f"[AI Reviewer v3] No project rules — using defaults")
 
-    # 3. Get file list via Gerrit REST API (no hermes needed)
+    # 3. Get file list and branch info via Gerrit REST API
     try:
         files = get_changed_files(change_id, auth_header)
+        change_detail = get_change_detail(change_id, auth_header)
+        target_branch = change_detail.get("branch", "")
+        print(f"[AI Reviewer v3] Change {change_id} is on branch '{target_branch}'")
     except Exception as e:
-        print(f"[AI Reviewer v3] Failed to get file list: {e}")
+        print(f"[AI Reviewer v3] Failed to get change info: {e}")
         return [], {"error": str(e)}
+
+    # 4. Check if indexed branch matches target — prompt user BEFORE any checkout
+    indexed_branch = ""
+    if project_dir and target_branch:
+        # Check what branch was indexed
+        try:
+            status_file = os.path.join(DIR, "project_status.json")
+            if os.path.isfile(status_file):
+                with open(status_file, "r", encoding="utf-8") as f:
+                    all_status = json.load(f)
+                proj_status = all_status.get(project_slug, {})
+                indexed_branch = proj_status.get("indexed_branch", "")
+        except Exception:
+            pass
+
+        # If indexed branch doesn't match, PAUSE and ask user (unless forced)
+        if indexed_branch and indexed_branch != target_branch and not force:
+            print(f"[AI Reviewer v3] ⚠ Index branch mismatch: indexed='{indexed_branch}', target='{target_branch}'")
+            print(f"[AI Reviewer v3] ⚠ Review paused — waiting for user decision")
+            return [], {
+                "branch_mismatch": True,
+                "indexed_branch": indexed_branch,
+                "target_branch": target_branch,
+                "project_slug": project_slug,
+                "change_id": change_id,
+            }
+
+        # If forced (user chose "Proceed Anyway" or "Re-index & Retry"), do the checkout
+        if force:
+            branch_changed = not ensure_correct_branch(project_dir, target_branch)
+            if branch_changed:
+                print(f"[AI Reviewer v3] ⚠ Branch changed to '{target_branch}' — codebase index may be stale")
+                write_mcp_config(change_id, auth_header, project_slug)
+            elif indexed_branch and indexed_branch != target_branch:
+                print(f"[AI Reviewer v3] ⚠ Index branch mismatch but proceeding anyway")
+        elif not indexed_branch:
+            # No index yet — just checkout to the target branch
+            ensure_correct_branch(project_dir, target_branch)
+            write_mcp_config(change_id, auth_header, project_slug)
 
     files_to_review = [f for f in files if f["lines_inserted"] + f["lines_deleted"] > 0]
     print(f"[AI Reviewer v3] {len(files)} files changed, {len(files_to_review)} with modifications")
@@ -314,6 +414,10 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
 
     # 7. Token summary
     total_diff_chars = sum(len(d) for d in file_diffs.values())
+    branch_warning = ""
+    if indexed_branch and indexed_branch != target_branch:
+        branch_warning = f"Index branch mismatch: indexed='{indexed_branch}', review branch='{target_branch}'. Re-index for best results."
+
     token_summary = {
         "input_tokens": estimate_tokens(rules_section) * len(file_diffs),
         "output_tokens": sum(estimate_tokens(json.dumps(c)) for c in deduped),
@@ -324,6 +428,9 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
         "elapsed_seconds": round(elapsed),
         "rules_strategy": "orchestrator-parallel",
         "has_mcp_tools": True,
+        "target_branch": target_branch,
+        "indexed_branch": indexed_branch,
+        "branch_warning": branch_warning,
     }
 
     print(
