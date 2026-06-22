@@ -29,15 +29,41 @@ import sys
 class _Tee:
     """Write to both stdout and a log file."""
     def __init__(self, log_path):
-        self._stdout = sys.stdout
-        self._file = open(log_path, "a", encoding="utf-8")
+        self._stdout = sys.__stdout__
+        self._file = None
+        try:
+            self._file = open(log_path, "a", encoding="utf-8")
+        except PermissionError:
+            try:
+                backup = log_path + ".old"
+                if os.path.exists(backup):
+                    os.remove(backup)
+                os.rename(log_path, backup)
+                self._file = open(log_path, "a", encoding="utf-8")
+            except Exception:
+                self._file = None
     def write(self, data):
-        self._stdout.write(data)
-        self._file.write(data)
-        self._file.flush()
+        try:
+            self._stdout.write(data)
+        except UnicodeEncodeError:
+            # Windows console uses cp1252 — replace unencodable chars
+            self._stdout.write(data.encode("cp1252", errors="replace").decode("cp1252"))
+        if self._file:
+            try:
+                self._file.write(data)
+                self._file.flush()
+            except Exception:
+                self._file = None
     def flush(self):
-        self._stdout.flush()
-        self._file.flush()
+        try:
+            self._stdout.flush()
+        except Exception:
+            pass
+        if self._file:
+            try:
+                self._file.flush()
+            except Exception:
+                pass
 
 _LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_output.log")
 sys.stdout = _Tee(_LOG)

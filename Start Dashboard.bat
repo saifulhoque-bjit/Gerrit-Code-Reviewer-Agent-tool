@@ -117,21 +117,32 @@ if %errorlevel% neq 0 (
     echo  [OK] Installation complete.
 )
 
+:: Cleanup installer
+del "%TEMP%\cbmcp_install.ps1" >nul 2>&1
+
 :: Verify
 where codebase-memory-mcp >nul 2>&1
 if %errorlevel% equ 0 (
     set CBMCP_FOUND=1
     echo  [OK] codebase-memory-mcp installed and on PATH.
+    echo.
+    echo  ====================================
+    echo   Restarting to pick up new PATH...
+    echo  ====================================
+    echo.
+    timeout /T 2 /NOBREAK >nul
+    start "" "%~f0"
+    exit /b 0
 ) else (
     echo.
     echo  [WARN] Installation may have failed. PATH may need to be refreshed.
     echo         Try closing and reopening this window.
     echo         Or install manually from:
     echo         https://github.com/DeusData/codebase-memory-mcp/releases/latest
+    echo.
+    pause
+    goto cbmcp_done
 )
-
-:: Cleanup installer
-del "%TEMP%\cbmcp_install.ps1" >nul 2>&1
 
 :cbmcp_done
 if %CBMCP_FOUND% equ 0 (
@@ -154,6 +165,14 @@ if not exist "%~dp0rules_engine.py" (
     echo  [OK] Rules engine found.
 )
 
+:: Kill any existing server processes
+echo.
+echo  [..] Cleaning up old server processes...
+for /f "tokens=1" %%i in ('wmic process where "CommandLine like '%%server.py%%'" get ProcessId /NH 2^>nul 2^>nul') do (
+    taskkill /F /PID %%i >nul 2>&1
+)
+timeout /T 1 /NOBREAK >nul
+
 :: All good - launch
 echo.
 echo  Starting server...
@@ -173,7 +192,7 @@ goto waitloop
 :quit
 echo.
 echo  Stopping server...
-for /f "tokens=1" %%i in ('wmic process where "CommandLine like '%%server.py%%'"" get ProcessId /NH 2^>nul') do (
+for /f "tokens=1" %%i in ('wmic process where "CommandLine like '%%server.py%%'" get ProcessId /NH 2^>nul 2^>nul') do (
     taskkill /F /PID %%i >nul 2>&1
 )
 echo  Stopped. Goodbye!
