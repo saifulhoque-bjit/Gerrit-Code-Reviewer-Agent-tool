@@ -202,10 +202,12 @@ def _cbmcp_cli(tool_name: str, args: dict, timeout: int = 30) -> dict:
     """Call a codebase-memory-mcp CLI tool and return the result."""
     cbmcp = _find_cbmcp()
     if not cbmcp:
+        print(f"[AI Reviewer v3]   cbmcp CLI: binary not found")
         return {}
     try:
+        cmd = [cbmcp, "cli", tool_name, json.dumps(args)]
         result = subprocess.run(
-            [cbmcp, "cli", tool_name, json.dumps(args)],
+            cmd,
             capture_output=True, text=True, timeout=timeout,
             encoding="utf-8", errors="replace"
         )
@@ -215,9 +217,16 @@ def _cbmcp_cli(tool_name: str, args: dict, timeout: int = 30) -> dict:
                 line = line.strip()
                 if line.startswith("{"):
                     return json.loads(line)
+            print(f"[AI Reviewer v3]   cbmcp CLI ({tool_name}): no JSON in stdout: {result.stdout[:200]}")
+            return {}
+        else:
+            print(f"[AI Reviewer v3]   cbmcp CLI ({tool_name}) failed (rc={result.returncode}): {result.stderr[:200]}")
+            return {}
+    except subprocess.TimeoutExpired:
+        print(f"[AI Reviewer v3]   cbmcp CLI ({tool_name}): timeout ({timeout}s)")
         return {}
     except Exception as e:
-        print(f"[AI Reviewer v3] cbmcp CLI error ({tool_name}): {e}")
+        print(f"[AI Reviewer v3]   cbmcp CLI error ({tool_name}): {e}")
         return {}
 
 def _get_cbmcp_project_name(project_slug: str) -> str:
