@@ -146,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", len(data))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
             self.end_headers()
             self.wfile.write(data)
         except FileNotFoundError:
@@ -196,7 +198,24 @@ class Handler(BaseHTTPRequestHandler):
             status = review_status.get(change_id, "not_started")
             result = review_results.get(change_id)
             error_msg = (result or {}).get("error", "") if status == "error" else ""
-            self.send_json({"status": status, "result": result, "error": error_msg})
+
+            # Include partial results if review is still pending
+            partial_comments = []
+            if status == "pending":
+                try:
+                    import ai_reviewer
+                    gerrit_id = change_id.split("_")[1] if "_" in change_id else change_id
+                    partial_key = f"_partial_{gerrit_id}"
+                    partial_comments = ai_reviewer._partial_results.get(partial_key, [])
+                    if partial_comments:
+                        print(f"[Status] Serving {len(partial_comments)} partial comments for {change_id} (key={partial_key})", flush=True)
+                except Exception as e:
+                    print(f"[Status] Error getting partial: {e}", flush=True)
+
+            resp = {"status": status, "result": result, "error": error_msg}
+            if partial_comments:
+                resp["partial_comments"] = partial_comments
+            self.send_json(resp)
         elif path.startswith("/rules/list/"):
             slug = urllib.parse.unquote(path.split("/rules/list/")[-1])
             self._rules_list(slug)

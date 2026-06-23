@@ -129,6 +129,51 @@ def get_change_detail(change_id: str, auth_header: str) -> dict:
     """Get change detail including branch name."""
     return gerrit_api_get(f"/a/changes/{change_id}/detail", auth_header)
 
+def post_review_comments(change_id: str, auth_header: str, comments: list, message: str = ""):
+    """Post review comments to Gerrit via REST API."""
+    if not comments:
+        return
+
+    # Group comments by file
+    by_file = {}
+    for c in comments:
+        f = c.get("file", "general")
+        if f not in by_file:
+            by_file[f] = []
+        severity = c.get("severity", "suggestion")
+        icon = {"error": "🔴", "warning": "🟡", "suggestion": "💡"}.get(severity, "💡")
+        line = c.get("line", 0)
+        comment_text = c.get("comment", "")
+        existing = c.get("existing_code", "")
+        suggestion = c.get("suggestion_code", "")
+
+        msg = f"{icon} [{severity.upper()}] {comment_text}"
+        if existing:
+            msg += f"\n\n**Current:**\n```\n{existing}\n```"
+        if suggestion:
+            msg += f"\n\n**Suggested:**\n```\n{suggestion}\n```"
+
+        entry = {"message": msg}
+        if line > 0:
+            entry["line"] = line
+        by_file[f].append(entry)
+
+    if not message:
+        message = f"AI Review: {len(comments)} comment(s) found"
+
+    payload = json.dumps({"message": message, "comments": by_file})
+    url = f"{GERRIT_URL}/a/changes/{change_id}/revisions/current/review"
+
+    req = urllib.request.Request(url, data=payload.encode("utf-8"), method="POST")
+    req.add_header("Authorization", auth_header)
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=30)
+        print(f"[AI Reviewer v3] Posted {len(comments)} comments to Gerrit change {change_id}")
+    except Exception as e:
+        print(f"[AI Reviewer v3] Failed to post comments to Gerrit: {e}")
+
 def ensure_correct_branch(project_dir: str, target_branch: str) -> bool:
     """Checkout the local clone to the target branch if needed.
     Returns True if already on correct branch, False if checkout was needed."""
@@ -239,7 +284,10 @@ def estimate_tokens(text: str) -> int:
 
 # ── Orchestrator: parallel review ────────────────────────────────
 MAX_WORKERS = 4
-WORKER_TIMEOUT = 180  # seconds per worker
+WORKER_TIMEOUT = 1800  # seconds per worker (30 min)
+
+# Partial results storage — allows streaming comments to UI as workers complete
+_partial_results = {}  # key: f"_partial_{change_id}" -> list of comments
 
 def _review_single_file(file_path: str, diff: str, rules_section: str,
                         project_slug: str, env: dict, worker_id: int) -> list:
@@ -296,6 +344,9 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
     import time as _t
     import concurrent.futures
 
+    # Clean up stale partial results for this change
+    partial_key = f"_partial_{change_id}"
+    _partial_results.pop(partial_key, None)
     _t0 = _t.time()
 
     # 1. Write MCP runtime config (for workers to use)
@@ -398,6 +449,14 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
             try:
                 comments = future.result()
                 all_comments.extend(comments)
+
+                # Stream partial results to UI immediately
+                if comments:
+                    partial_key = f"_partial_{change_id}"
+                    if partial_key not in _partial_results:
+                        _partial_results[partial_key] = []
+                    _partial_results[partial_key].extend(comments)
+                    print(f"[AI Reviewer v3] → {path}: {len(comments)} comments (key={partial_key}, total={len(_partial_results[partial_key])})", flush=True)
             except Exception as e:
                 print(f"[AI Reviewer v3] Worker exception for {path}: {e}")
 

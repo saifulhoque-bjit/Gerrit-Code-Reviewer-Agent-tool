@@ -182,18 +182,7 @@ echo.
 
 start "" /B cmd /C "timeout /T 2 /NOBREAK >nul && start http://localhost:7474"
 cd /d "%~dp0"
-start "" /B python -u server.py > server_output.log 2>&1
-
-:waitloop
-set /p INPUT=
-if /i "%INPUT%"=="q" goto quit
-goto waitloop
-
-:quit
+python -u server.py
 echo.
-echo  Stopping server...
-for /f "tokens=1" %%i in ('wmic process where "CommandLine like '%%server.py%%'" get ProcessId /NH 2^>nul 2^>nul') do (
-    taskkill /F /PID %%i >nul 2>&1
-)
-echo  Stopped. Goodbye!
-timeout /T 1 /NOBREAK >nul
+echo  Server stopped.
+pause

@@ -260,6 +260,25 @@
   </div>
 </div>
 
+<!-- Project not analyzed dialog -->
+<div id="analyzeDialog" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);align-items:center;justify-content:center">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:480px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <span style="font-size:24px">🧠</span>
+      <h3 style="margin:0;font-size:16px;font-weight:700">Project Not Analyzed</h3>
+    </div>
+    <p id="analyzeDialogMsg" style="color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 20px"></p>
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button id="analyzeDialogSkip" style="background:var(--bg3);color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:10px 20px;font-size:13px;cursor:pointer;transition:background 0.15s">
+        ⏭ Skip & Review Anyway
+      </button>
+      <button id="analyzeDialogGo" style="background:var(--accent);color:white;border:none;border-radius:8px;padding:10px 20px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity 0.15s">
+        🧠 Go to Analysis
+      </button>
+    </div>
+  </div>
+</div>
+
 <script>
 const PROXY = 'http://localhost:7474/api';
 let currentFile = null;
@@ -317,6 +336,84 @@ function showBranchDialog(targetBranch, indexedBranch) {
     document.getElementById('dialogSkip').onclick = () => { cleanup(); resolve('skip'); };
     document.getElementById('dialogReindex').onclick = () => { cleanup(); resolve('reindex'); };
   });
+}
+
+// ── Analyze dialog ──────────────────────────────────────────────
+function showAnalyzeDialog(message) {
+  return new Promise((resolve) => {
+    const dlg = document.getElementById('analyzeDialog');
+    document.getElementById('analyzeDialogMsg').textContent = message;
+    dlg.style.display = 'flex';
+
+    const cleanup = () => {
+      dlg.style.display = 'none';
+      document.getElementById('analyzeDialogSkip').onclick = null;
+      document.getElementById('analyzeDialogGo').onclick = null;
+    };
+
+    document.getElementById('analyzeDialogSkip').onclick = () => { cleanup(); resolve('skip'); };
+    document.getElementById('analyzeDialogGo').onclick = () => { cleanup(); resolve('go'); };
+  });
+}
+
+async function runAnalysisHere() {
+  const projectSlug = sessionStorage.getItem('current_project_slug') || '';
+  if (!projectSlug) { showToast('No project selected.', 'error'); return false; }
+
+  const analyzeBtn = document.getElementById('analyzeDialogGo');
+  if (analyzeBtn) { analyzeBtn.disabled = true; analyzeBtn.textContent = '⏳ Analyzing...'; }
+
+  showToast('Checking out branch and analyzing codebase...', 'info');
+
+  try {
+    // 1. Checkout to the correct branch
+    const checkoutR = await fetch(`/projects/checkout/${encodeURIComponent(projectSlug)}`, {
+      method: 'POST',
+      headers: { 'Authorization': getAuth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ branch: branch })
+    });
+    const checkoutData = await checkoutR.json();
+    if (checkoutData.error) {
+      showToast('Checkout failed: ' + checkoutData.error, 'error');
+      return false;
+    }
+
+    // 2. Trigger analysis
+    const analyzeR = await fetch(`/projects/analyze/${encodeURIComponent(projectSlug)}`, {
+      method: 'POST',
+      headers: { 'Authorization': getAuth() }
+    });
+    const analyzeData = await analyzeR.json();
+    if (analyzeData.error) {
+      showToast('Analysis failed: ' + analyzeData.error, 'error');
+      return false;
+    }
+
+    // 3. Poll until indexing is done
+    let attempts = 0;
+    while (attempts < 180) {  // max 6 minutes
+      await new Promise(r => setTimeout(r, 2000));
+      const statusR = await fetch(`/projects/status/${encodeURIComponent(projectSlug)}`, {
+        headers: { 'Authorization': getAuth() }
+      });
+      const status = await statusR.json();
+      if (status.indexed) {
+        showToast('Analysis complete!', 'success');
+        return true;
+      }
+      if (status.error) {
+        showToast('Analysis error: ' + status.error, 'error');
+        return false;
+      }
+      attempts++;
+    }
+
+    showToast('Analysis timed out.', 'error');
+    return false;
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+    return false;
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────
@@ -516,12 +613,13 @@ async function startAiReview(scope) {
         const status = await statusR.json();
         if (!status.indexed && !status.indexing) {
           const msg = status.cloned
-            ? 'This project has been cloned but not analyzed yet.\nRunning the analysis improves review quality significantly.\n\nDo you want to run it now?'
-            : 'This project hasn\'t been set up yet.\nCloning + analyzing improves review quality significantly.\n\nDo you want to run it now?';
-          if (confirm(msg)) {
-            // Redirect to commits page to run analysis
-            window.location.href = 'commits.html';
-            return;
+            ? 'This project has been cloned but not analyzed yet. Running the analysis improves review quality significantly.'
+            : 'This project hasn\'t been set up yet. Cloning + analyzing improves review quality significantly.';
+          const choice = await showAnalyzeDialog(msg);
+          if (choice === 'go') {
+            const success = await runAnalysisHere();
+            if (!success) return;
+            // Analysis done — proceed with review
           }
         }
       }
@@ -629,7 +727,10 @@ async function pollReview(pollKey, scope, isFile) {
           console.groupEnd();
         }
 
-        reviewStore[scope] = comments;
+        // Merge: keep partial results if final result is empty
+        const finalComments = comments || [];
+        const existingComments = reviewStore[scope] || [];
+        reviewStore[scope] = finalComments.length > 0 ? finalComments : existingComments;
 
         // Update file badge in sidebar
         if (isFile) {
@@ -679,9 +780,9 @@ async function pollReview(pollKey, scope, isFile) {
             pollReview(pollKey, scope, isFile);
           } catch(e) { showToast('Error: ' + e.message, 'error'); }
         }
-      } else if (Date.now() - start > 900000) {  // 15 min client-side cap
+      } else if (Date.now() - start > 1800000) {  // 30 min client-side cap
         resetBtn(scope, isFile);
-        showToast('Review timed out after 15 minutes.', 'error');
+        showToast('Review timed out after 30 minutes.', 'error');
       } else {
         // Show elapsed time on button so user knows it's still running
         const elapsed = Math.floor((Date.now() - start) / 1000);
@@ -689,6 +790,24 @@ async function pollReview(pollKey, scope, isFile) {
           const btn = document.getElementById('aiReviewBtn');
           if (btn) btn.innerHTML = `<span class="spinner"></span> Reviewing… ${elapsed}s`;
         }
+
+        // Stream partial results to UI as files finish reviewing
+        if (data.partial_comments && data.partial_comments.length > 0) {
+          const existing = reviewStore[scope] || [];
+          if (data.partial_comments.length > existing.length) {
+            reviewStore[scope] = data.partial_comments;
+            renderPanelTabs();
+            setActiveTab(scope);
+            // Show post button as soon as there are comments
+            document.getElementById('postBtn').style.display = '';
+            // Update button to show progress
+            if (!isFile) {
+              const btn = document.getElementById('aiReviewBtn');
+              if (btn) btn.innerHTML = `<span class="spinner"></span> Reviewing… ${data.partial_comments.length} comments (${elapsed}s)`;
+            }
+          }
+        }
+
         setTimeout(poll, 2000);
       }
     } catch { setTimeout(poll, 3000); }
