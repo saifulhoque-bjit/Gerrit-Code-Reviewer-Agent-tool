@@ -18,8 +18,10 @@ AI-powered code review for Gerrit, built on [Hermes Agent](https://hermes-agent.
 │                   ai_reviewer.py (Orchestrator)                      │
 │  1. Fetches file list + per-file diffs via Gerrit REST API           │
 │  2. Auto-checks out correct branch if mismatch                       │
-│  3. Spawns N parallel hermes workers (max 4)                         │
-│  4. Aggregates + deduplicates JSON results                           │
+│  3. Pre-fetches architecture context from codebase-memory-mcp        │
+│  4. Spawns N parallel hermes workers (max 4)                         │
+│  5. Streams partial results to UI as workers complete                 │
+│  6. Aggregates + deduplicates JSON results                           │
 ├────────┬────────┬────────┬───────────────────────────────────────────┤
 │Worker 1│Worker 2│Worker 3│Worker 4        hermes -z (parallel)       │
 │file A  │file B  │file C  │file D                                      │
@@ -28,207 +30,137 @@ AI-powered code review for Gerrit, built on [Hermes Agent](https://hermes-agent.
 │  gerrit_get_diff · gerrit_read_diff · gerrit_file_read               │
 │  gerrit_code_search · gerrit_list_files · reload_config               │
 ├──────────────────────────────────────────────────────────────────────┤
-│              Gerrit REST API (review2.bjitgroup.com:8443)             │
+│         codebase-memory-mcp (MCP via mcp_proxy.py)                   │
+│  get_architecture · search_graph · trace_path · detect_changes        │
+│  get_code_snippet · query_graph · search_code · manage_adr            │
 └──────────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Architecture](#architecture)
-- [File Structure](#file-structure)
-- [How It Works](#how-it-works)
-- [Rules System](#rules-system)
-- [Project Management](#project-management)
-- [Configuration](#configuration)
-- [MCP Tools Reference](#mcp-tools-reference)
-- [Dashboard Pages](#dashboard-pages)
-- [Troubleshooting](#troubleshooting)
-
----
 
 ## Quick Start
 
 ### Prerequisites
 
-| Dependency | Required | Notes |
-|------------|----------|-------|
-| **Python 3.11+** | ✅ | No pip packages — stdlib only |
-| **Hermes Agent** | ✅ | `hermes` CLI on PATH ([install](https://hermes-agent.nousresearch.com)) |
+| Tool | Required | Purpose |
+|------|----------|---------|
+| **Python 3.11+** | Yes | Runs the dashboard server |
+| **Hermes Agent** | Yes | AI model runner ([install](https://hermes-agent.nousresearch.com)) |
 | **codebase-memory-mcp** | Optional | For codebase indexing ([releases](https://github.com/DeusData/codebase-memory-mcp/releases)) |
-| **Gerrit account** | ✅ | HTTP password from Gerrit → Settings → HTTP Credentials |
 
 ### Launch
 
 ```bash
-# Windows — double-click:
+# Windows — double-click or run:
 Start Dashboard.bat
 
 # Or manually:
 python server.py
-# Opens at http://localhost:7474
+# Then open http://localhost:7474
 ```
+
+The batch file auto-checks dependencies and installs `codebase-memory-mcp` if missing.
 
 ### First Review
 
-1. **Log in** → Enter Gerrit username + HTTP password
-2. **Clone a project** → Projects page → pick a project → Clone
-3. **Checkout branch** → Select the branch your changes are on
-4. **Index codebase** → Click Analyze (optional but improves quality)
-5. **Open a change** → Changes page → pick a change → Review
-6. **Click "AI Review"** → Wait 1-2 minutes → see inline comments
+1. **Login** — enter your Gerrit username + HTTP password
+2. **Projects** — clone a project, pick a branch, click "Analyze"
+3. **Commits** — browse open changes, click "🤖 Review Commit"
+4. **Review** — watch comments stream in, select which to post to Gerrit
 
 ---
 
 ## Architecture
 
-### Review Flow (v3 — Orchestrator Pattern)
+### File Structure
 
 ```
-User clicks "AI Review"
-        │
-        ▼
-server.py (background thread)
-        │
-        ▼
-ai_reviewer.review()
-        │
-        ├─ 1. Gerrit REST API: get changed files + branch info
-        ├─ 2. Auto-checkout if local clone is on wrong branch
-        ├─ 3. Gerrit REST API: get per-file diffs (no hermes)
-        ├─ 4. Load rules (_base + _lang + project-specific)
-        │
-        ├─ 5. ThreadPoolExecutor (max 4 workers)
-        │     ├─ Worker 1: hermes -z "review file A" --yolo --cli
-        │     ├─ Worker 2: hermes -z "review file B" --yolo --cli
-        │     ├─ Worker 3: hermes -z "review file C" --yolo --cli
-        │     └─ Worker 4: hermes -z "review file D" --yolo --cli
-        │
-        ├─ 6. Parse JSON from each worker output
-        ├─ 7. Deduplicate by (file, line)
-        │
-        ▼
-Return comments to frontend
-```
-
-**Key design decisions:**
-- **File list + diffs fetched via Python** (Gerrit REST API) — not via hermes, avoids MCP overhead
-- **One worker per file** — focused context (2-5K diff vs 256K), deeper analysis
-- **Parallel execution** — 4 files complete in ~1-2 min (vs 3-5 min sequential)
-- **No `capture_output=True`** — uses file-based stdout/stderr to avoid Windows pipe deadlock with MCP child processes
-
----
-
-## File Structure
-
-```
-D:/Gerrit Code Reviewer Agent tool/
 ├── server.py                 # HTTP server, API proxy, project management
-├── ai_reviewer.py            # Orchestrator — parallel hermes workers
-├── gerrit_mcp_server.py      # MCP server (JSON-RPC over stdio)
-├── rules_engine.py           # 3-tier rule resolver
-├── run.py                    # Process launcher with restart support
-├── Start Dashboard.bat       # Windows launcher (checks deps, opens browser)
-│
+├── ai_reviewer.py            # Orchestrator: parallel worker management
+├── gerrit_mcp_server.py      # MCP server: 6 Gerrit tools (stdio)
+├── rules_engine.py           # 3-tier rule resolver (base + lang + project)
+├── run.py                    # Process launcher with auto-restart
+├── Start Dashboard.bat       # Windows launcher with dependency checks
+├── tools/
+│   └── mcp_proxy.py          # MCP proxy (fixes pipe buffering on Windows)
+├── rules/
+│   ├── _base/                # Always-on rules (3 files)
+│   ├── _lang/                # Language-specific rules (11 languages)
+│   └── <project>/            # Project-specific rules (user-managed)
+├── projects/                 # Cloned Gerrit repos
+├── temp/                     # Runtime files (auto-cleaned)
 ├── index.html                # Login page
-├── projects.html             # Project list + clone/branch/index controls
+├── projects.html             # Project management
 ├── changes.html              # Open changes browser
-├── commits.html              # Commit detail + rules toolbar + review trigger
-├── review.html               # Review results — diff viewer + inline comments
-├── style.css                 # Dark theme (CSS custom properties)
-│
-├── rules/                    # Review rules (3-tier)
-│   ├── _base/                # Always applied
-│   │   ├── default.md        # Default review checklist
-│   │   ├── clean-code-guard.md   # 23 clean code imperatives
-│   │   └── ai-failure-modes.md   # 8 AI-specific failure patterns
-│   ├── _lang/                # Language-specific (auto-matched by extension)
-│   │   ├── java.md
-│   │   ├── python.md
-│   │   └── ts_js_tsx_jsx.md
-│   └── <project-slug>/       # Project-specific (uploaded via UI)
-│
-├── projects/                 # Cloned Gerrit repos (gitignored)
-│   └── <project-slug>/
-│       ├── config.json       # git_url, branch, auto_analyze settings
-│       └── repo/             # Shallow git clone (--depth=1)
-│
-├── temp/                     # Runtime files (gitignored)
-│   ├── mcp_runtime.json      # Per-review MCP config (change_id, auth)
-│   ├── prompt_*.txt          # Debug copy of prompts
-│   └── hermes_*.txt          # Temp stdout/stderr (cleaned after review)
-│
-├── project_status.json       # Persisted project status (indexed, branch, etc.)
-└── .gitignore
+├── commits.html              # Commit detail + rules toolbar
+├── review.html               # Review results + diff viewer
+└── style.css                 # Dark theme CSS
 ```
+
+### Key Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/` | Login page |
+| GET | `/projects.html` | Project management |
+| GET | `/changes.html` | Open changes browser |
+| GET | `/commits.html` | Commit detail + AI review trigger |
+| GET | `/review.html` | Review results + diff viewer |
+| GET | `/api/*` | Proxy → Gerrit REST API |
+| GET | `/ai-review/status/<key>` | Poll review status + partial results |
+| POST | `/ai-review/start/<key>` | Start AI review |
+| POST | `/ai-review/proceed-anyway/<key>` | Skip branch mismatch warning |
+| POST | `/ai-review/reindex-and-retry/<key>` | Re-index + retry review |
+| POST | `/projects/clone/<slug>` | Clone a Gerrit project |
+| POST | `/projects/checkout/<slug>` | Switch branch + index |
+| POST | `/projects/analyze/<slug>` | Run codebase indexing |
+| GET/POST | `/rules/*` | Manage review rules |
 
 ---
 
 ## How It Works
 
-### 1. Authentication
-
-- Login page validates credentials against Gerrit's `/a/accounts/self` REST API
-- Credentials stored as Base64 `Basic` auth in browser `sessionStorage`
-- All API requests include `Authorization: Basic ...` header
-- For git operations (clone, fetch), credentials are embedded in the HTTPS URL
-
-### 2. Project Lifecycle
+### Review Flow
 
 ```
-Clone → Branch → Index → Review
-  │        │        │        │
-  │        │        │        └─ Workers use codebase-memory-mcp for context
-  │        │        └─ codebase-memory-mcp indexes source into knowledge graph
-  │        └─ git checkout + shallow fetch if branch not local
-  └─ git clone --depth=1 (default branch)
+1. User clicks "🤖 Review Commit"
+2. Frontend POSTs to /ai-review/start/<poll_key>
+3. server.py spawns ai_reviewer.review() in background thread
+4. Orchestrator:
+   a. Writes MCP config (change_id, auth, project_dir)
+   b. Resolves rules file paths (base + lang + project)
+   c. Fetches file list + per-file diffs via Gerrit REST API
+   d. Ensures correct branch checkout
+   e. Pre-fetches architecture context from codebase-memory-mcp
+   f. Spawns N parallel hermes workers (max 4)
+5. Each worker:
+   a. Reads rules files via read_file tool
+   b. Calls get_architecture, search_graph, trace_path
+   c. Analyzes diff with full codebase context
+   d. Returns JSON array of findings
+6. Orchestrator aggregates + deduplicates results
+7. Frontend polls status → streams partial results → shows final comments
+8. User selects comments → clicks "📬 Post Selected" → posts to Gerrit
 ```
 
-**Auto-detection** — `_detect_index_target()` identifies project type and narrows indexing:
+### Branch Mismatch Handling
 
-| Type | Detection | Index Target |
-|------|-----------|-------------|
-| Android | `app/src/main/java` | `app/src/main` |
-| Spring Boot | `src/main/java` | `src/main` |
-| Laravel | `artisan` | `app`, `routes`, `resources` |
-| Node.js | `package.json` | `.` (root, excludes `node_modules`) |
-| Python | `pyproject.toml` / `requirements.txt` | `.` |
-| .NET | `*.csproj` | `.` (excludes `bin/obj`) |
-| Flutter | `pubspec.yaml` | `lib` |
-| Rust | `Cargo.toml` | `src` |
-| Go | `go.mod` | `.` |
-| Swift | `*.xcodeproj` | `Sources` |
+When a change targets a branch different from the indexed branch:
 
-### 3. AI Review (v3 Orchestrator)
+1. **Detection** — orchestrator checks indexed branch vs target branch
+2. **Dialog** — custom modal: "Re-index & Retry" or "Skip & Review Anyway"
+3. **Auto-checkout** — fetches + checks out the correct branch (handles shallow clones)
+4. **Re-index** — runs codebase-memory-mcp indexing on the new branch
+5. **Retry** — restarts the review with `force=True`
 
-Each hermes worker receives:
-- **One file's diff** (2-5K chars, capped at 15K)
-- **Project rules** (_base + _lang + project-specific)
-- **MCP tools** for context (`gerrit_file_read`, `gerrit_code_search`)
+### Streaming Results
 
-Workers return JSON arrays:
-```json
-[
-  {
-    "file": "src/Main.java",
-    "line": 42,
-    "severity": "error",
-    "comment": "Division by zero — input is not validated before parseInt",
-    "existing_code": "int value = Integer.parseInt(input);\nSystem.out.println(100 / value);",
-    "suggestion_code": "int value = Integer.parseInt(input);\nif (value == 0) throw new IllegalArgumentException(\"Cannot divide by zero\");\nSystem.out.println(100 / value);"
-  }
-]
+Comments appear in the UI **as each worker finishes** — no waiting for all files:
+
 ```
-
-### 4. JSON Parsing
-
-The orchestrator extracts JSON from worker output using:
-1. Direct `json.loads()` — if output is pure JSON
-2. Markdown code fence extraction — `` ```json [...] ``` ``
-3. Bracket-counting — finds all valid JSON arrays, returns the longest
-4. Empty fallback — if no JSON found, returns `[]` (no prose pollution)
+Worker 1 finishes → 3 comments → UI shows them + "📬 Post Selected" appears
+Worker 2 finishes → 1 comment  → UI appends it
+Worker 3 finishes → 0 comments → (no change)
+Worker 4 finishes → 2 comments → UI shows 6 total
+```
 
 ---
 
@@ -236,97 +168,64 @@ The orchestrator extracts JSON from worker output using:
 
 ### 3-Tier Priority
 
-```
-rules/_base/          ← Always included (lowest priority)
-  ├── default.md          Default review checklist
-  ├── clean-code-guard.md 23 imperatives
-  └── ai-failure-modes.md 8 AI failure patterns
+| Tier | Directory | Purpose | Example |
+|------|-----------|---------|---------|
+| **Base** | `rules/_base/` | Always applied | AI failure modes, clean code guard, default checklist |
+| **Language** | `rules/_lang/` | Matched by file extension | Swift, C#, Kotlin, Java, Python, TS/JS, Go, Rust, C/C++, PHP, Ruby |
+| **Project** | `rules/<slug>/` | Project-specific overrides | Custom rules for a specific codebase |
 
-rules/_lang/          ← Matched by file extension (medium priority)
-  ├── java.md             *.java
-  ├── python.md           *.py
-  └── ts_js_tsx_jsx.md    *.ts, *.js, *.tsx, *.jsx
+### Supported Languages (11)
 
-rules/<project-slug>/ ← Project-specific (highest priority)
-  └── custom.md           Uploaded via dashboard UI
-```
-
-### Base Rules Summary
-
-**`default.md`** — 5 categories: Correctness, Security, Performance, Maintainability, Error Handling
-
-**`clean-code-guard.md`** — 23 imperatives:
-- Functions: ≤20 lines, ≤4 args, names reveal intent
-- SOLID: one actor per module, extension via new code
-- DRY/KISS/YAGNI: correct DRY, complexity ceiling (cyclomatic ≤10)
-- AI-Specific: no broad catch-all, verify imports, no hardcoded success
-
-**`ai-failure-modes.md`** — 8 patterns LLMs systematically produce:
-1. Broad error swallowing (`catch (Exception) → null`)
-2. Hardcoded success returns (`return {"status": "ok"}`)
-3. Hallucinated APIs (flagging real APIs as non-existent)
-4. Copy-from-similar bugs (off-by-one from copy-paste)
-5. Dead code (unreachable branches, unused imports)
-6. Defensive guards for impossible cases
-7. Premature abstraction (interface with one implementation)
-8. Comment pollution (paraphrasing comments)
-
-### Language Rules Summary
-
-| Language | Key Checks |
-|----------|-----------|
-| **Java** | Typos in declarations, dead code, logic errors, N+1 queries, thread safety |
-| **Python** | Mutable defaults, bare except, builtin shadowing, eval/exec, pickle |
-| **TS/JS** | No `var`, strict equality, React hooks rules, async error handling, XSS |
+| Language | File | Key Rules |
+|----------|------|-----------|
+| Swift | `swift.md` | Force unwrap, retain cycles, MainActor, SwiftUI |
+| C# | `csharp.md` | IDisposable, async/await, Blazor lifecycle, EF Core N+1 |
+| Kotlin | `kotlin.md` | Null safety, coroutines, Flow, Android lifecycle |
+| Java | `java.md` | Thread safety, N+1 queries, boundary errors |
+| Python | `python.md` | Mutable defaults, bare except, type hints |
+| TS/JS | `ts_js_tsx_jsx.md` | var usage, strict equality, React hooks, async |
+| Go | `go.md` | Unchecked errors, goroutine leaks, race conditions |
+| Rust | `rust.md` | unwrap() in prod, Arc<Mutex> deadlocks, unsafe |
+| C/C++ | `c_cpp.md` | Buffer overflow, use-after-free, RAII, smart pointers |
+| PHP | `php.md` | SQL injection, XSS, type juggling |
+| Ruby | `ruby.md` | Mass assignment, YAML.load, eval dangers |
 
 ### Managing Rules
 
-- **Upload**: Commits page → Rules toolbar → upload `.md`/`.txt` files
-- **Compress**: Auto-compressed after upload for token efficiency
-- **Clear**: Rules toolbar → Clear button removes all project rules
-- **Per-project**: Rules stored in `rules/<project-slug>/`
+- **Dashboard** — Commits page → Rules toolbar → Upload `.md`/`.txt` files
+- **Manual** — Place files in `rules/<project-slug>/`
+- **Compressed** — Auto-generated after upload for faster loading
 
 ---
 
-## Project Management
+## MCP Tools
 
-### Clone
+### Gerrit Tools (6)
 
-```
-POST /projects/clone/<slug>
-Body: {"git_url": "https://...", "project": "p1737_..."}
-```
-- Shallow clone (`git clone --depth=1`) of default branch
-- Saves `projects/<slug>/config.json`
-- Runs in background thread
+| Tool | Purpose |
+|------|---------|
+| `gerrit_get_diff` | Full unified diff of a change |
+| `gerrit_list_files` | Changed files with insert/delete counts |
+| `gerrit_read_diff` | Per-file diff |
+| `gerrit_file_read` | Read file content from local clone |
+| `gerrit_code_search` | Search across entire repository |
+| `reload_config` | Reload MCP runtime config |
 
-### Branch
+### Codebase-Memory Tools (14)
 
-```
-POST /projects/checkout/<slug>
-Body: {"branch": "dev-20260522"}
-```
-- Tries local checkout → fetch + create → shallow fetch fallback
-- Saves branch to `config.json`
-- Auto-triggers indexing after checkout
-
-### Index
-
-```
-POST /projects/analyze/<slug>
-```
-- Runs `codebase-memory-mcp cli index_repository '{"repo_path":"..."}'`
-- Indexes source code into knowledge graph
-- Status persisted in `project_status.json`
-- Workers use the knowledge graph for context during reviews
-
-### Branch-Aware Reviews
-
-When a review starts for change on branch X but the local clone is on branch Y:
-1. Orchestrator detects the mismatch via Gerrit API
-2. Auto-checks out the correct branch
-3. Logs a warning that the codebase index may be stale
-4. **User should re-index** for best results (Projects page → Analyze)
+| Tool | Purpose |
+|------|---------|
+| `get_architecture` | Project structure, packages, layers, hotspots |
+| `search_graph` | Find functions/classes/routes by name or pattern |
+| `trace_path` | Trace call chains (callers/callees/data flow) |
+| `detect_changes` | Impact analysis of code changes |
+| `get_code_snippet` | Read source for a specific function/class |
+| `query_graph` | Cypher queries against the knowledge graph |
+| `search_code` | Graph-augmented code search |
+| `list_projects` | List all indexed projects |
+| `index_status` | Check indexing status |
+| `manage_adr` | Architecture Decision Records |
+| + 4 more | Schema, deletion, trace ingestion |
 
 ---
 
@@ -334,188 +233,81 @@ When a review starts for change on branch X but the local clone is on branch Y:
 
 ### Files
 
-| File | Purpose | Persisted |
-|------|---------|-----------|
-| `project_status.json` | Project indexing status | ✅ Survives restart |
-| `projects/<slug>/config.json` | Per-project git URL, branch, settings | ✅ |
-| `temp/mcp_runtime.json` | Per-review MCP config (change_id, auth) | ❌ Recreated each review |
+| File | Purpose |
+|------|---------|
+| `config.json` | Per-project: git URL, branch, auto-analyze |
+| `project_status.json` | Persisted indexing status |
+| `temp/mcp_runtime.json` | Per-review MCP config (auth, change_id) |
+| `rules/_base/*.md` | Base review rules |
+| `rules/_lang/*.md` | Language-specific rules |
+| `rules/<slug>/*.md` | Project-specific rules |
 
 ### Environment Variables
 
-| Variable | Set By | Purpose |
-|----------|--------|---------|
-| `GERRIT_MCP_CONFIG` | `ai_reviewer.py` | Path to `mcp_runtime.json` for MCP server |
-| `GERRIT_URL` | `server.py` (hardcoded) | Gerrit server URL |
-| `GERRIT_MCP_CONFIG` | Hermes config | Points MCP server to runtime config |
+| Variable | Purpose |
+|----------|---------|
+| `GERRIT_MCP_CONFIG` | Path to MCP runtime config (set by orchestrator) |
+| `LOCALAPPDATA` | Used to find codebase-memory-mcp binary |
 
-### Hardcoded Values
+### Binary Discovery
 
-| Setting | Value | Location |
-|---------|-------|----------|
-| Gerrit URL | `https://review2.bjitgroup.com:8443` | `server.py`, `ai_reviewer.py` |
-| Dashboard port | `7474` | `server.py` |
-| SSL verification | Disabled | `server.py`, `ai_reviewer.py` |
-| Max workers | `4` | `ai_reviewer.py` |
-| Worker timeout | `180s` | `ai_reviewer.py` |
-| Diff cap per file | `15,000 chars` | `ai_reviewer.py` |
-| Clone depth | `1` (shallow) | `server.py` |
-
----
-
-## MCP Tools Reference
-
-The `gerrit-review` MCP server provides 6 tools to hermes workers:
-
-### `gerrit_get_diff`
-Fetch the full unified diff of a Gerrit change.
-- **Params**: `change_id` (optional, uses config default)
-- **Returns**: Full patch text
-
-### `gerrit_read_diff`
-Read the diff of a specific file.
-- **Params**: `file_path` (required)
-- **Returns**: Unified diff for that file only
-
-### `gerrit_file_read`
-Read file content from local clone or Gerrit API.
-- **Params**: `file_path` (required), `start_line`, `end_line` (optional)
-- **Returns**: File contents with line numbers
-
-### `gerrit_code_search`
-Search for text patterns across the entire repository (when cloned) or changed files.
-- **Params**: `search_text` (required), `file_patterns` (optional glob array)
-- **Returns**: Matching lines with file:line format
-- **Note**: Uses `grep -r` on local clone for full-repo search
-
-### `gerrit_list_files`
-List all files changed in a Gerrit revision.
-- **Params**: `change_id` (optional)
-- **Returns**: File paths with insert/delete counts
-
-### `reload_config`
-Reload runtime config from `mcp_runtime.json`.
-- **Params**: none
-- **Returns**: Current config values
-
----
-
-## Dashboard Pages
-
-### Login (`index.html`)
-- Username + password form
-- Validates against Gerrit `/a/accounts/self`
-- Stores Base64 auth in `sessionStorage`
-
-### Projects (`projects.html`)
-- Lists all Gerrit projects
-- Clone button → shallow clone in background
-- Branch picker → `git ls-remote` for branch list
-- Analyze button → codebase-memory-mcp indexing
-- Status badges: Cloned, Indexed, Error
-
-### Changes (`changes.html`)
-- Lists all `status:open` changes grouped by project
-- Search/filter by project name
-- Shows change metadata: subject, author, branch, labels
-- Click → navigates to review page
-
-### Commits (`commits.html`)
-- Shows commit detail: subject, author, date, message
-- Changed files list with +/− stats
-- Rules toolbar: upload, manage, compress rules
-- "AI Review" button → triggers orchestrator
-- Live elapsed timer during review
-
-### Review (`review.html`)
-- Side-by-side diff viewer (resizable sidebar with drag handle)
-- AI comments with severity badges (error/warning/suggestion)
-- Inline code suggestions (existing → suggested)
-- Per-file review button in sidebar
-- Project analysis prompt if not indexed
+`codebase-memory-mcp` is found in this order:
+1. `PATH` (global install via `install.ps1`)
+2. `%LOCALAPPDATA%\Programs\codebase-memory-mcp\` (default install location)
+3. `~/.local/bin/` (Unix-style install)
 
 ---
 
 ## Troubleshooting
 
-### Review hangs / no output
+### Review returns 0 comments
 
-**Cause**: Windows pipe deadlock with `capture_output=True`
-**Fix**: Already fixed in v3 — uses file-based stdout/stderr
+- **Cause**: Rules not matching, model capability, or branch mismatch
+- **Fix**: Check `server_output.log` for worker output. Ensure project is indexed.
 
-### Review returns empty array `[]`
+### WinError 206: Filename too long
 
-**Possible causes**:
-1. Change's branch differs from local clone → re-index on correct branch
-2. Diff too large → capped at 15K per file
-3. hermes returned prose instead of JSON → bracket-counting parser handles this
+- **Cause**: Prompt exceeds Windows 32K CLI limit
+- **Fix**: Rules are referenced by file path (not embedded). If still hitting limits, reduce diff cap in `ai_reviewer.py`.
 
-### `gerrit_code_search` returns "No matches found"
+### codebase-memory-mcp not found
 
-**Cause**: Searching only changed files (no local clone)
-**Fix**: Clone the project first → full-repo search via `grep -r`
+- **Cause**: Binary not on PATH or common locations
+- **Fix**: Run `install.ps1` from the [releases page](https://github.com/DeusData/codebase-memory-mcp/releases), or place binary in `%LOCALAPPDATA%\Programs\codebase-memory-mcp\`.
 
-### MCP server connection failed
+### MCP connection timeout
 
-**Cause**: `codebase-memory-mcp.exe` not found or Windows pipe buffering
-**Fix**: Ensure binary at `D:\tools\codebase-memory-mcp.exe` or on PATH. See `codebase-memory-mcp-windows` skill for pipe buffering workaround.
+- **Cause**: Pipe buffering on Windows
+- **Fix**: The `tools/mcp_proxy.py` proxy handles this automatically. Ensure Hermes config points to the proxy.
 
-### `Start Dashboard.bat` shows "filename syntax incorrect"
+### Branch checkout fails
 
-**Cause**: Escaped quotes in batch file
-**Fix**: Update to latest version — uses `cmd /C` wrapper with proper escaping
-
-### Project not indexing
-
-**Check**:
-1. `project_status.json` — look for `error` field
-2. `server_output.log` — look for `[Index]` lines
-3. Binary exists: `where codebase-memory-mcp` or check `D:\tools\`
-
-### Review takes too long
-
-**Expected times**:
-| Files | Workers | Time |
-|-------|---------|------|
-| 1-2 | 1-2 | 30-60s |
-| 3-4 | 4 | 60-120s |
-| 5-10 | 4 (batched) | 2-4 min |
-
-If slower: check hermes cold start (~20s), MCP server connection, model response time.
+- **Cause**: Shallow clone or deleted branch
+- **Fix**: The system auto-fetches missing branches with `--depth=1`. If the branch was deleted in Gerrit, the review proceeds on the current branch.
 
 ---
 
 ## Development
 
-### Adding Language Rules
+### Adding a New Language
 
-1. Create `rules/_lang/<language>.md`
-2. Rules auto-matched by file extension mapping in `rules_engine.py`
-3. Supported extensions: `*.java`, `*.py`, `*.ts`, `*.js`, `*.tsx`, `*.jsx`, `*.kt`, `*.rs`, `*.c`, `*.cpp`, `*.cs`, `*.go`, `*.rb`, `*.php`, `*.swift`, `*.scala`
+1. Create `rules/_lang/<language>.md` with numbered rules
+2. Add file extension mapping in `rules_engine.py` → `LANG_MAP`
+3. Rules auto-apply when files with matching extensions are reviewed
 
-### Adding Project Rules
+### Adding Project-Specific Rules
 
 1. Create `rules/<project-slug>/` directory
-2. Add `.md` or `.txt` files
-3. Or use the dashboard: Commits page → Rules toolbar → Upload
+2. Add `.md` or `.txt` rule files
+3. Rules auto-merge with base + language rules (highest priority)
 
-### Modifying the MCP Server
+### Modifying MCP Tools
 
-The MCP server (`gerrit_mcp_server.py`) communicates via JSON-RPC 2.0 over stdio:
-- Reads requests from stdin (one JSON per line)
-- Writes responses to stdout
-- Logs to stderr (captured in `mcp-stderr.log`)
-
-### Modifying the Orchestrator
-
-Key constants in `ai_reviewer.py`:
-```python
-MAX_WORKERS = 4          # Parallel hermes workers
-WORKER_TIMEOUT = 180     # Seconds per worker
-GERRIT_URL = "https://review2.bjitgroup.com:8443"
-```
+- **Gerrit tools**: Edit `gerrit_mcp_server.py` → add handler + register in `tools/list`
+- **Codebase tools**: Use the [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) project
 
 ---
 
 ## License
 
-Internal tool — BJIT Group.
+Internal tool for BJIT. Built on [Hermes Agent](https://hermes-agent.nousresearch.com) by Nous Research.

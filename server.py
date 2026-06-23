@@ -1236,13 +1236,28 @@ def _run_index(slug, repo_dir):
         print(f"[Index] ▶ Starting index for '{slug}'")
         print(f"[Index]   repo_dir: {repo_dir}")
 
-        # Find codebase-memory-mcp binary
+        # Find codebase-memory-mcp binary (PATH first, then common locations)
         cbmcp = shutil.which("codebase-memory-mcp")
         if not cbmcp:
             cbmcp = shutil.which("codebase-memory-mcp.exe")
+        if not cbmcp:
+            local_app = os.environ.get("LOCALAPPDATA", "")
+            if local_app:
+                candidate = os.path.join(local_app, "Programs", "codebase-memory-mcp", "codebase-memory-mcp.exe")
+                if os.path.isfile(candidate):
+                    cbmcp = candidate
+        if not cbmcp:
+            home = os.path.expanduser("~")
+            for candidate in [
+                os.path.join(home, ".local", "bin", "codebase-memory-mcp"),
+                os.path.join(home, ".local", "bin", "codebase-memory-mcp.exe"),
+            ]:
+                if os.path.isfile(candidate):
+                    cbmcp = candidate
+                    break
 
         if not cbmcp:
-            raise RuntimeError("codebase-memory-mcp not found. Install it globally first.")
+            raise RuntimeError("codebase-memory-mcp not found on PATH or common locations. Install it first.")
 
         print(f"[Index]   binary: {cbmcp}")
 

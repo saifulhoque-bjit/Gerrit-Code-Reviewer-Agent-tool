@@ -65,10 +65,17 @@ if %errorlevel% equ 0 (
     goto cbmcp_done
 )
 
-:: Check 2: D:\tools\
-if exist "D:\tools\codebase-memory-mcp.exe" (
+:: Check 2: LOCALAPPDATA\Programs (default install location)
+if exist "%LOCALAPPDATA%\Programs\codebase-memory-mcp\codebase-memory-mcp.exe" (
     set CBMCP_FOUND=1
-    echo  [OK] Found at D:\tools\codebase-memory-mcp.exe
+    echo  [OK] Found in %LOCALAPPDATA%\Programs\codebase-memory-mcp\
+    goto cbmcp_done
+)
+
+:: Check 3: User profile .local/bin
+if exist "%USERPROFILE%\.local\bin\codebase-memory-mcp.exe" (
+    set CBMCP_FOUND=1
+    echo  [OK] Found in %USERPROFILE%\.local\bin\
     goto cbmcp_done
 )
 

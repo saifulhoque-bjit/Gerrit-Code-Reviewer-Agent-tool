@@ -63,7 +63,6 @@ print(f"[AI Reviewer v3] Using Hermes binary: {HERMES_BIN}")
 
 # ── Import rules engine ──────────────────────────────────────────
 sys.path.insert(0, DIR)
-from rules_engine import resolve_rules
 
 # ── SSL context (skip verification for internal Gerrit) ──────────
 SSL_CTX = ssl.create_default_context()
@@ -174,6 +173,114 @@ def post_review_comments(change_id: str, auth_header: str, comments: list, messa
     except Exception as e:
         print(f"[AI Reviewer v3] Failed to post comments to Gerrit: {e}")
 
+# ── Codebase-memory CLI helpers ──────────────────────────────────
+def _find_cbmcp():
+    """Find codebase-memory-mcp binary — PATH first, then common locations."""
+    import shutil
+    found = shutil.which("codebase-memory-mcp")
+    if found:
+        return found
+    found = shutil.which("codebase-memory-mcp.exe")
+    if found:
+        return found
+    # Common fallback locations (platform-aware)
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        candidate = os.path.join(local_app, "Programs", "codebase-memory-mcp", "codebase-memory-mcp.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    home = os.path.expanduser("~")
+    for candidate in [
+        os.path.join(home, ".local", "bin", "codebase-memory-mcp"),
+        os.path.join(home, ".local", "bin", "codebase-memory-mcp.exe"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+def _cbmcp_cli(tool_name: str, args: dict, timeout: int = 30) -> dict:
+    """Call a codebase-memory-mcp CLI tool and return the result."""
+    cbmcp = _find_cbmcp()
+    if not cbmcp:
+        return {}
+    try:
+        result = subprocess.run(
+            [cbmcp, "cli", tool_name, json.dumps(args)],
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace"
+        )
+        if result.returncode == 0:
+            # Parse JSON from stdout (skip non-JSON lines like "level=info ...")
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("{"):
+                    return json.loads(line)
+        return {}
+    except Exception as e:
+        print(f"[AI Reviewer v3] cbmcp CLI error ({tool_name}): {e}")
+        return {}
+
+def _get_cbmcp_project_name(project_slug: str) -> str:
+    """Convert project slug to codebase-memory project name format."""
+    # codebase-memory uses the repo path with slashes replaced by dashes
+    return f"D-Gerrit-Code-Reviewer-Agent-tool-projects-{project_slug}-repo"
+
+def prefetch_project_context(project_slug: str, change_id: str, file_paths: list) -> dict:
+    """Pre-fetch architecture and file context from codebase-memory before spawning workers.
+    Returns dict with 'architecture' summary and per-file 'file_context' entries."""
+    context = {"architecture": "", "file_context": {}, "hotspots": []}
+
+    project_name = _get_cbmcp_project_name(project_slug)
+    if not project_name:
+        return context
+
+    # 1. Get architecture overview
+    print(f"[AI Reviewer v3] Pre-fetching architecture for {project_slug}...")
+    arch = _cbmcp_cli("get_architecture", {"project": project_name, "aspects": ["all"]}, timeout=30)
+    if arch:
+        # Summarize the architecture into a compact string
+        langs = ", ".join(f"{l['language']} ({l['file_count']} files)" for l in arch.get("languages", [])[:5])
+        packages = ", ".join(f"{p['name']} ({p['node_count']} nodes)" for p in arch.get("packages", [])[:8])
+        layers = ", ".join(f"{l['name']}={l['layer']}" for l in arch.get("layers", [])[:5])
+        hotspots = [f"{h['name']} (fan_in={h['fan_in']})" for h in arch.get("hotspots", [])[:5]]
+        context["architecture"] = f"Languages: {langs}\nPackages: {packages}\nLayers: {layers}"
+        context["hotspots"] = hotspots
+        print(f"[AI Reviewer v3]   Architecture: {len(arch.get('packages', []))} packages, {len(arch.get('hotspots', []))} hotspots")
+
+    # 2. For each changed file, get its context
+    for path in file_paths[:8]:  # limit to 8 files to avoid slow queries
+        # Convert file path to qualified name pattern
+        # e.g., "msvweb/components/pages/017_md/010_md_upload/Md_upload_form.razor"
+        # → search for functions/classes in that file
+        fname = os.path.basename(path)
+        print(f"[AI Reviewer v3]   Searching context for {fname}...")
+
+        search_result = _cbmcp_cli("search_graph", {
+            "project": project_name,
+            "file_pattern": f"*{fname}",
+            "limit": 10
+        }, timeout=15)
+
+        if search_result and search_result.get("results"):
+            nodes = search_result["results"]
+            # Summarize: what types of nodes, key functions
+            node_types = {}
+            key_functions = []
+            for n in nodes:
+                label = n.get("label", "unknown")
+                node_types[label] = node_types.get(label, 0) + 1
+                if label in ("Function", "Method"):
+                    key_functions.append(n.get("name", ""))
+
+            context["file_context"][path] = {
+                "types": node_types,
+                "key_functions": key_functions[:5],
+                "total_nodes": len(nodes)
+            }
+
+    print(f"[AI Reviewer v3] Context pre-fetched: {len(context['file_context'])} files analyzed")
+    return context
+
 def ensure_correct_branch(project_dir: str, target_branch: str) -> bool:
     """Checkout the local clone to the target branch if needed.
     Returns True if already on correct branch, False if checkout was needed."""
@@ -194,7 +301,17 @@ def ensure_correct_branch(project_dir: str, target_branch: str) -> bool:
         print(f"[AI Reviewer v3] Branch mismatch: local='{current_branch}', target='{target_branch}'")
         print(f"[AI Reviewer v3] Checking out '{target_branch}'...")
 
-        # Try checkout
+        # First check if the branch exists on the remote
+        ls_result = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", target_branch],
+            capture_output=True, text=True, timeout=30,
+            cwd=project_dir, encoding="utf-8", errors="replace"
+        )
+        if not ls_result.stdout.strip():
+            print(f"[AI Reviewer v3] Branch '{target_branch}' does not exist on remote — staying on current branch")
+            return True  # branch doesn't exist, but don't treat as error
+
+        # Try checkout (might work if branch is already local)
         result = subprocess.run(
             ["git", "checkout", target_branch],
             capture_output=True, text=True, timeout=60,
@@ -204,25 +321,35 @@ def ensure_correct_branch(project_dir: str, target_branch: str) -> bool:
         if result.returncode == 0:
             print(f"[AI Reviewer v3] Checked out '{target_branch}' successfully")
             return False
-        else:
-            # Try fetch + checkout
-            print(f"[AI Reviewer v3] Checkout failed, fetching branch from remote...")
+
+        # Checkout failed — fetch the branch from remote (handles shallow clones)
+        print(f"[AI Reviewer v3] Fetching '{target_branch}' from remote...")
+        
+        # For shallow clones, add the branch to allowed refs first
+        subprocess.run(
+            ["git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+            capture_output=True, text=True, timeout=10,
+            cwd=project_dir, encoding="utf-8", errors="replace"
+        )
+        
+        fetch_result = subprocess.run(
+            ["git", "fetch", "--depth=1", "origin", f"{target_branch}:{target_branch}"],
+            capture_output=True, text=True, timeout=120,
+            cwd=project_dir, encoding="utf-8", errors="replace"
+        )
+        
+        if fetch_result.returncode == 0:
             subprocess.run(
-                ["git", "fetch", "origin", target_branch],
-                capture_output=True, text=True, timeout=120,
+                ["git", "checkout", target_branch],
+                capture_output=True, text=True, timeout=30,
                 cwd=project_dir, encoding="utf-8", errors="replace"
             )
-            result = subprocess.run(
-                ["git", "checkout", "-b", target_branch, f"origin/{target_branch}"],
-                capture_output=True, text=True, timeout=60,
-                cwd=project_dir, encoding="utf-8", errors="replace"
-            )
-            if result.returncode == 0:
-                print(f"[AI Reviewer v3] Fetched and checked out '{target_branch}'")
-                return False
-            else:
-                print(f"[AI Reviewer v3] ⚠ Failed to checkout '{target_branch}': {result.stderr[:200]}")
-                return False
+            print(f"[AI Reviewer v3] Fetched and checked out '{target_branch}'")
+            return False
+        else:
+            print(f"[AI Reviewer v3] Fetch failed: {fetch_result.stderr[:200]}")
+            print(f"[AI Reviewer v3] Staying on current branch")
+            return False
 
     except Exception as e:
         print(f"[AI Reviewer v3] ⚠ Branch check failed: {e}")
@@ -259,17 +386,30 @@ WORKER_PROMPT_TEMPLATE = """You are a senior code reviewer. Review this single f
 File: {file_path}
 Project: {project_slug}
 
-{rules_section}
+PROJECT CONTEXT:
+{architecture}
+
+HOTSPOTS (high fan-in functions — changes here have wide impact):
+{hotspots}
+
+FILE CONTEXT:
+{file_context}
+
+REVIEW RULES: Read the file {rules_file} for the review checklist. Apply all rules from that file.
 
 DIFF:
 {diff}
 
 INSTRUCTIONS:
-1. Analyze the diff for real bugs, security issues, or logic errors
+1. Read the rules file first, then analyze the diff for real bugs, security issues, or logic errors
 2. If code references components/methods not in this diff, use gerrit_code_search to verify they exist before flagging
 3. Use gerrit_file_read to see surrounding code context if needed
-4. Do NOT flag style, naming, or cosmetic issues
-5. If no real issues found, return []
+4. Use get_architecture to understand the project structure and patterns
+5. Use search_graph to find related functions/classes and understand call chains
+6. Use trace_path to check if changed functions are called from critical paths
+7. Use detect_changes to understand the blast radius of this change
+8. Do NOT flag style, naming, or cosmetic issues
+9. If no real issues found, return []
 
 OUTPUT (strict JSON array only, no prose):
 [{{"file":"{file_path}","line":N,"severity":"error|warning|suggestion","comment":"description","existing_code":"code","suggestion_code":"fixed_code"}}]
@@ -289,16 +429,32 @@ WORKER_TIMEOUT = 1800  # seconds per worker (30 min)
 # Partial results storage — allows streaming comments to UI as workers complete
 _partial_results = {}  # key: f"_partial_{change_id}" -> list of comments
 
-def _review_single_file(file_path: str, diff: str, rules_section: str,
-                        project_slug: str, env: dict, worker_id: int) -> list:
+def _review_single_file(file_path: str, diff: str, rules_file: str,
+                        project_slug: str, env: dict, worker_id: int,
+                        project_context: dict = None) -> list:
     """Worker: review one file using a hermes subprocess."""
     import time as _t
+
+    # Build context strings from pre-fetched data
+    ctx = project_context or {}
+    architecture = ctx.get("architecture", "Not available — project not indexed.")
+    hotspots = "\n".join(f"- {h}" for h in ctx.get("hotspots", [])) or "None available"
+    file_ctx = ctx.get("file_context", {}).get(file_path, {})
+    if file_ctx:
+        funcs = ", ".join(file_ctx.get("key_functions", []))
+        types = ", ".join(f"{k}:{v}" for k, v in file_ctx.get("types", {}).items())
+        file_context_str = f"Contains: {types}\nKey functions: {funcs or 'none detected'}"
+    else:
+        file_context_str = "Not available — file not indexed."
 
     prompt = WORKER_PROMPT_TEMPLATE.format(
         file_path=file_path,
         project_slug=project_slug or "unknown",
-        rules_section=rules_section,
-        diff=diff[:15000],  # cap per-file diff at 15K chars
+        architecture=architecture,
+        hotspots=hotspots,
+        file_context=file_context_str,
+        rules_file=rules_file,
+        diff=diff[:8000],  # cap per-file diff at 8K chars
     )
 
     stdout_file = os.path.join(TEMP_DIR, f"worker_{worker_id}_stdout.txt")
@@ -352,13 +508,35 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
     # 1. Write MCP runtime config (for workers to use)
     project_dir = write_mcp_config(change_id, auth_header, project_slug)
 
-    # 2. Resolve rules
-    rules = resolve_rules(filenames, project_slug)
-    rules_section = f"REVIEW RULES:\n{rules}" if rules else ""
-    if rules:
-        print(f"[AI Reviewer v3] Rules loaded: {len(rules)} chars")
-    else:
-        print(f"[AI Reviewer v3] No project rules — using defaults")
+    # 2. Build rules file paths (hermes reads them via read_file tool)
+    from rules_engine import detect_languages, RULES_DIR
+    import re
+    lang_files = detect_languages(filenames)
+    safe_slug = re.sub(r"[^a-zA-Z0-9._-]", "_", project_slug) if project_slug else ""
+
+    rules_paths = []
+    # Base rules
+    base_dir = os.path.join(RULES_DIR, "_base")
+    if os.path.isdir(base_dir):
+        for f in sorted(os.listdir(base_dir)):
+            if f.endswith(".md"):
+                rules_paths.append(os.path.join(base_dir, f))
+    # Language rules
+    lang_dir = os.path.join(RULES_DIR, "_lang")
+    for lang_file in sorted(lang_files):
+        path = os.path.join(lang_dir, lang_file)
+        if os.path.isfile(path):
+            rules_paths.append(path)
+    # Project rules
+    if safe_slug:
+        proj_dir = os.path.join(RULES_DIR, safe_slug)
+        if os.path.isdir(proj_dir):
+            for f in sorted(os.listdir(proj_dir)):
+                if f.endswith((".md", ".txt")) and not f.startswith("_"):
+                    rules_paths.append(os.path.join(proj_dir, f))
+
+    rules_file = " | ".join(rules_paths) if rules_paths else "no rules file found"
+    print(f"[AI Reviewer v3] Rules files: {len(rules_paths)} files")
 
     # 3. Get file list and branch info via Gerrit REST API
     try:
@@ -427,9 +605,14 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
         print(f"[AI Reviewer v3] No diffs to review")
         return [], {"files_reviewed": 0}
 
-    # 5. Spawn parallel workers
+    # 5. Pre-fetch project context from codebase-memory
+    project_context = prefetch_project_context(project_slug, change_id, list(file_diffs.keys()))
+
+    # 6. Spawn parallel workers
     env = os.environ.copy()
     env["GERRIT_MCP_CONFIG"] = MCP_CONFIG_PATH
+    # Use shorter HERMES_HOME to avoid Windows 260-char path limit
+    env["HERMES_HOME"] = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Users\\Saiful\\AppData\\Local"), "hermes")
 
     num_workers = min(MAX_WORKERS, len(file_diffs))
     print(f"[AI Reviewer v3] Spawning {num_workers} workers for {len(file_diffs)} files...")
@@ -441,7 +624,7 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
         for i, (path, diff) in enumerate(file_diffs.items()):
             worker_id = i + 1
             futures[executor.submit(
-                _review_single_file, path, diff, rules_section, project_slug, env, worker_id
+                _review_single_file, path, diff, rules_file, project_slug, env, worker_id, project_context
             )] = path
 
         for future in concurrent.futures.as_completed(futures):
@@ -478,10 +661,14 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
         branch_warning = f"Index branch mismatch: indexed='{indexed_branch}', review branch='{target_branch}'. Re-index for best results."
 
     token_summary = {
-        "input_tokens": estimate_tokens(rules_section) * len(file_diffs),
+        "input_tokens": estimate_tokens(rules_file) * len(file_diffs),
         "output_tokens": sum(estimate_tokens(json.dumps(c)) for c in deduped),
-        "total_tokens": estimate_tokens(rules_section) * len(file_diffs) + sum(estimate_tokens(json.dumps(c)) for c in deduped),
-        "estimated_cost_usd": 0.0,
+        "total_tokens": estimate_tokens(rules_file) * len(file_diffs) + sum(estimate_tokens(json.dumps(c)) for c in deduped),
+        "estimated_cost_usd": round(
+            (estimate_tokens(rules_file) * len(file_diffs) / 1_000_000) * INPUT_COST_PER_1M
+            + (sum(estimate_tokens(json.dumps(c)) for c in deduped) / 1_000_000) * OUTPUT_COST_PER_1M,
+            6
+        ),
         "files_reviewed": len(file_diffs),
         "workers_used": num_workers,
         "elapsed_seconds": round(elapsed),
@@ -492,12 +679,21 @@ def review(change_id: str, diff_text: str, filenames: list, project_slug: str = 
         "branch_warning": branch_warning,
     }
 
+    in_tok = token_summary["input_tokens"]
+    out_tok = token_summary["output_tokens"]
+    total_tok = token_summary["total_tokens"]
+    cost = token_summary["estimated_cost_usd"]
+
     print(
         f"[AI Reviewer v3] ── Review Summary ──────────────────────────\n"
         f"  Files reviewed : {len(file_diffs)}\n"
         f"  Workers used   : {num_workers}\n"
         f"  Comments found : {len(deduped)}\n"
         f"  Total time     : {elapsed:.0f}s\n"
+        f"  Input tokens   : {in_tok:,}\n"
+        f"  Output tokens  : {out_tok:,}\n"
+        f"  Total tokens   : {total_tok:,}\n"
+        f"  Estimated cost : ${cost:.6f} USD\n"
         f"[AI Reviewer v3] ─────────────────────────────────────────────"
     )
     sys.stdout.flush()
