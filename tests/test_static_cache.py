@@ -12,7 +12,7 @@ def test_dashboard_html_disables_browser_caching():
     assert response.headers["cache-control"] == "no-cache, no-store, must-revalidate"
 
 
-def test_inspect_navigates_same_tab_to_the_change():
+def test_inspect_opens_a_dedicated_change_page():
     from reviewer.app import STATIC_DIR
 
     dashboard = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -21,5 +21,8 @@ def test_inspect_navigates_same_tab_to_the_change():
     # window.open (which gets popup-blocked / auto-closed).
     assert "window.location.href = `/?change=${encodeURIComponent(changeId)}`" in dashboard
     assert "window.open(" not in dashboard
-    # The reloaded SPA bootstraps the workspace from the ?change= param.
+    # ?change= reloads into a dedicated full-page view (v3's review.html feel):
+    # the queue + controls hide, only the workspace shows.
     assert 'new URLSearchParams(window.location.search).get("change")' in dashboard
+    assert 'document.body.classList.add("change-view")' in dashboard
+    assert "body.change-view #queuePanel { display: none; }" in dashboard

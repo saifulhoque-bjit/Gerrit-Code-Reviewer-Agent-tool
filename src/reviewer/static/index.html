@@ -108,6 +108,9 @@
 
   .workspace { display: none; margin: 0 0 30px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
   .workspace.show { display: block; animation: slidein .3s ease; }
+  /* Change-view mode: ?change=<id> renders a dedicated full page (like v3's
+     review.html) — hide the queue + controls, show only the workspace. */
+  body.change-view .bar, body.change-view .hint, body.change-view #queuePanel { display: none; }
   .workspace-head { display: flex; align-items: center; gap: 10px; padding: 13px 15px; background: var(--surface); border-bottom: 1px solid var(--border); }
   .workspace-title { flex: 1; min-width: 0; font: 600 13px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .workspace-head button { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 7px 13px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all .15s; }
@@ -479,7 +482,12 @@ workspaceFiles.addEventListener("click", (event) => {
   if (button) loadWorkspaceDiff(button.dataset.workspaceFile);
 });
 $("workspaceReview").addEventListener("click", start);
-$("closeWorkspace").addEventListener("click", () => workspaceEl.classList.remove("show"));
+$("closeWorkspace").addEventListener("click", () => {
+  // In the dedicated change view, Close returns to the queue page (like v3's
+  // back navigation); otherwise it just collapses the inline panel.
+  if (document.body.classList.contains("change-view")) window.location.href = "/";
+  else workspaceEl.classList.remove("show");
+});
 $("history").addEventListener("click", async () => {
   const r = await fetch("/reviews");
   const data = await r.json();
@@ -501,9 +509,13 @@ results.addEventListener("click", async (e) => {
 const inspectChange = new URLSearchParams(window.location.search).get("change");
 fetch("/auth/status").then((r) => r.json()).then((data) => {
   if (!data.authenticated) window.location.replace("/login.html");
-  else {
+  else if (inspectChange) {
+    // Dedicated change view (like v3's review.html): full-page workspace, no queue.
+    document.body.classList.add("change-view");
+    loadProjects();
+    openWorkspace(inspectChange);
+  } else {
     loadProjects().then(loadQueue);
-    if (inspectChange) openWorkspace(inspectChange);
   }
 });
 </script>
