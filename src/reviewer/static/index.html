@@ -169,6 +169,18 @@
   .status .grow { flex: 1; font-weight: 500; }
   .status .meta { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 
+  /* Loader: spinner in the button while reviewing + a scanning box in results. */
+  .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; display: inline-block; vertical-align: -2px; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 48px; color: var(--muted); font-size: 13px; }
+  .loading .ring { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--surface-2); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+
+  /* Clickable finding comments + the pulse when one is revealed in the diff. */
+  .comment[data-file] { cursor: pointer; }
+  .comment[data-file]:hover { border-color: var(--accent); }
+  .diff-line.pulse, .split-table tr.pulse td { animation: pulse 1.8s ease; }
+  @keyframes pulse { 0%, 100% { background-color: transparent; } 25%, 60% { background-color: rgba(91,155,255,.35); } }
+
   .file-group { margin-bottom: 22px; }
   .file-head {
     font-family: var(--mono); font-size: 13px; color: var(--text);
@@ -447,7 +459,8 @@ function renderUnified(diff) {
     else if (!line.startsWith("\\")) { finding = findingAt(workspace.activeFile, newLine++); }
     const severity = finding?.severity === "error" ? "error" : "";
     const title = finding ? ` title="${escAttr(finding.comment)}"` : "";
-    return `<span class="diff-line ${kind}${finding ? ` finding ${severity}` : ""}"${title}>${esc(line)}</span>`;
+    const mark = finding ? ` data-finding-line="${finding.line}"` : "";
+    return `<span class="diff-line ${kind}${finding ? ` finding ${severity}` : ""}"${title}${mark}>${esc(line)}</span>`;
   }).join("");
   return `<pre class="diff">${lines}</pre>`;
 }
@@ -469,7 +482,8 @@ function renderSplit(diff) {
     const f = findLine != null ? findingAt(workspace.activeFile, findLine) : null;
     const cls = kind + (f ? ` finding${f.severity === "error" ? " err" : ""}` : "");
     const title = f ? ` title="${escAttr(f.comment)}"` : "";
-    return `<tr class="${cls}"${title}><td class="ln">${ln}</td><td>${esc(text)}</td></tr>`;
+    const mark = f ? ` data-finding-line="${f.line}"` : "";
+    return `<tr class="${cls}"${title}${mark}><td class="ln">${ln}</td><td>${esc(text)}</td></tr>`;
   };
   const gap = () => `<tr class="gap"><td class="ln"></td><td> </td></tr>`;
 
@@ -563,7 +577,7 @@ function render() {
       const sev = ["error", "warning", "suggestion"].includes(c.severity) ? c.severity : "suggestion";
       const off = c.id && deselected.has(c.id);
       const cls = `comment ${sev}${c.posted ? " posted" : off ? " deselected" : ""}`;
-      html += `<div class="${cls}" data-comment-card="${c.id || ""}"><div class="top">`;
+      html += `<div class="${cls}" data-comment-card="${c.id || ""}" data-file="${escAttr(c.file)}" data-line="${c.line || 0}"><div class="top">`;
       // A checkbox to include/exclude this comment from the post (posted → locked).
       if (c.id && !c.posted) html += `<input type="checkbox" class="pick" data-pick="${c.id}"${off ? "" : " checked"}>`;
       html += `<span class="sev ${sev}">${sev}</span>` +
@@ -605,9 +619,12 @@ async function start() {
 
   byFile = new Map(); doneFiles = 0; totalFiles = 0;
   currentChange = change; deselected.clear();
-  render();
+  results.innerHTML = '<div class="loading"><div class="ring"></div><span>Reviewing change ' + esc(change) + '…</span></div>';
   $("go").disabled = true;
+  $("go").innerHTML = '<span class="spinner"></span>';
+  $("workspaceReview").disabled = true;
   setStatus("live", "Connecting…");
+  scrollToStatus();
 
   // Subscribe to the stream FIRST so we never miss the "started" event,
   // then kick off the review. (POST starts a background task immediately.)
@@ -623,6 +640,7 @@ async function start() {
       if (evt.comments && evt.comments.length) {
         byFile.set(evt.file, evt.comments);
         render();
+        scrollToBottom();  // follow findings as they stream in
       }
       setStatus("live", "Reviewing…", `${doneFiles} / ${totalFiles} files`);
     } else if (evt.type === "done") {
@@ -637,15 +655,16 @@ async function start() {
       }
       render();
       renderWorkspaceDiff();
-      es.close(); $("go").disabled = false;
+      endRun(es); scrollToBottom();
     } else if (evt.type === "error") {
       setStatus("err", "Error", evt.error || "");
-      es.close(); $("go").disabled = false;
+      results.innerHTML = '<div class="empty">Review failed. See status above.</div>';
+      endRun(es);
     }
   };
   es.onerror = () => {
     setStatus("err", "Stream disconnected", "");
-    es.close(); $("go").disabled = false;
+    endRun(es);
   };
 
   // Now start the review.
@@ -656,13 +675,25 @@ async function start() {
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
       setStatus("err", `Could not start (${r.status})`, body.detail || "");
-      es.close(); $("go").disabled = false;
+      results.innerHTML = '<div class="empty">Could not start review. See status above.</div>';
+      endRun(es);
     }
   } catch (e) {
     setStatus("err", "Request failed", String(e));
-    es.close(); $("go").disabled = false;
+    endRun(es);
   }
 }
+
+// Restore the Review buttons and close the stream — one place so every exit
+// path (done / error / disconnect / start failure) leaves the UI consistent.
+function endRun(es) {
+  es.close();
+  $("go").disabled = false; $("go").textContent = "Review";
+  $("workspaceReview").disabled = false;
+}
+
+const scrollToBottom = () => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+const scrollToStatus = () => $("status").scrollIntoView({ behavior: "smooth", block: "center" });
 
 $("go").addEventListener("click", start);
 $("change").addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
@@ -718,7 +749,24 @@ results.addEventListener("click", async (e) => {
   }
   const editBtn = e.target.closest("[data-edit]");
   if (editBtn) { toggleEdit(Number(editBtn.dataset.edit), editBtn); return; }
+  // Ignore clicks on interactive bits; otherwise reveal the finding in the diff.
+  if (e.target.closest("input, button, textarea, pre")) return;
+  const card = e.target.closest("[data-comment-card]");
+  if (card && card.dataset.file) revealFinding(card.dataset.file, Number(card.dataset.line));
 });
+
+// Click a finding → open its file's diff and scroll/pulse the exact line.
+async function revealFinding(file, line) {
+  if (!workspaceEl.classList.contains("show")) workspaceEl.classList.add("show");
+  if (workspace.activeFile !== file && workspace.files.some((f) => f.path === file)) {
+    await loadWorkspaceDiff(file);  // switches active file + re-renders the diff
+  }
+  const sel = `[data-finding-line="${CSS.escape(String(line))}"]`;
+  const el = diffPane.querySelector(sel);
+  if (!el) { workspaceEl.scrollIntoView({ behavior: "smooth", block: "start" }); return; }
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse");
+}
 // Checkbox toggle: track which comments the reviewer excluded from the post.
 results.addEventListener("change", (e) => {
   const pick = e.target.closest("[data-pick]");

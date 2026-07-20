@@ -71,3 +71,18 @@ def test_dashboard_has_rules_and_analytics_panels():
     assert 'method: "PUT"' in dashboard
     # Analytics reads the effectiveness endpoint.
     assert 'fetch("/rules/effectiveness")' in dashboard
+
+
+def test_dashboard_has_loader_autoscroll_and_reveal():
+    from reviewer.app import STATIC_DIR
+
+    dashboard = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # A spinner in the button + a scanning box while a review runs.
+    assert 'class="spinner"' in dashboard and 'class="loading"' in dashboard
+    # Findings follow the stream to the bottom.
+    assert "scrollToBottom" in dashboard
+    # Clicking a comment reveals + pulses its diff line.
+    assert "function revealFinding(" in dashboard
+    assert "data-finding-line" in dashboard
+    assert "pulse" in dashboard
