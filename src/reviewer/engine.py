@@ -54,8 +54,15 @@ def _price_usage(settings: Settings, usage: TokenUsage) -> TokenUsage:
     return usage
 
 
-def _write_mcp_config(settings: Settings, change_id: str, auth: str, project_dir: str) -> str:
-    """Per-review config the MCP server reads (change id, auth, project dir)."""
+def _write_mcp_config(
+    settings: Settings, change_id: str, auth: str, project_dir: str, branch: str = ""
+) -> str:
+    """Per-review config the MCP server reads (change id, auth, project dir, branch).
+
+    branch lets MCP context lookups (gerrit_file_read / gerrit_code_search)
+    resolve symbols against the change's target branch instead of the repo
+    default — otherwise cross-file verification can hit the wrong revision.
+    """
     temp = Path("temp")
     temp.mkdir(exist_ok=True)
     path = temp / "mcp_runtime.json"
@@ -65,6 +72,7 @@ def _write_mcp_config(settings: Settings, change_id: str, auth: str, project_dir
             "auth": auth,
             "gerrit_url": settings.gerrit.url,
             "project_dir": project_dir,
+            "branch": branch,
         }),
         encoding="utf-8",
     )
@@ -121,7 +129,7 @@ async def run_review(
 
     rules_dir = rules_dir or settings.review.rules_path()
     rule_paths = [str(p) for p in resolve_rule_paths(rules_dir, list(file_diffs), project_slug)]
-    mcp_config = _write_mcp_config(settings, change_id, auth, "")
+    mcp_config = _write_mcp_config(settings, change_id, auth, "", branch)
 
     await emit({"type": "started", "change_id": change_id, "patchset": patchset,
                 "total_files": len(file_diffs)})
@@ -134,6 +142,7 @@ async def run_review(
                 found = await worker(
                     path, diff, rule_paths, project_slug, mcp_config,
                     settings.review.diff_cap_chars, settings.review.worker_timeout_seconds,
+                    branch=branch,
                 )
             except Exception:
                 found = []  # ponytail: a worker crash yields no comments, not a failed review

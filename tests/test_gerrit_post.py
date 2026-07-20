@@ -79,7 +79,7 @@ class RecordingGerrit:
         return f"--- a/{file_path}\n+new"
 
 
-async def _worker(path, diff, rules, slug, mcp, cap, timeout):
+async def _worker(path, diff, rules, slug, mcp, cap, timeout, *, branch=""):
     return [ReviewComment(file=path, line=1, comment="issue")]
 
 

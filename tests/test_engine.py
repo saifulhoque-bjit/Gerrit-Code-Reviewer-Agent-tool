@@ -80,7 +80,7 @@ class FakeGerrit:
         return f"--- a/{file_path}\n+++ b/{file_path}\n+new line"
 
 
-async def fake_worker(path, diff, rule_paths, slug, mcp_config, cap, timeout):
+async def fake_worker(path, diff, rule_paths, slug, mcp_config, cap, timeout, *, branch=""):
     # One comment per file; a.py gets a duplicate to exercise dedup.
     if path == "a.py":
         return [ReviewComment(file="a.py", line=1, comment="issue"),

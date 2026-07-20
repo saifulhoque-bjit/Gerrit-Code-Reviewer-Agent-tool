@@ -17,6 +17,7 @@ PROMPT_TEMPLATE = """You are a senior code reviewer. Review this single file cha
 
 File: {file_path}
 Project: {project_slug}
+Target branch: {branch}
 
 DIFF:
 {diff}
@@ -39,6 +40,7 @@ async def review_file_direct(
     diff_cap: int = 8000,
     timeout: int = 1800,
     *,
+    branch: str = "",
     base_url: str,
     model: str,
     api_key: str,
@@ -54,6 +56,7 @@ async def review_file_direct(
     prompt = PROMPT_TEMPLATE.format(
         file_path=file_path,
         project_slug=project_slug or "unknown",
+        branch=branch or "unknown",
         diff=diff[:diff_cap],
     )
     payload = {

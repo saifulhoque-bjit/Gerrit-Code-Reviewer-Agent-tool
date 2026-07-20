@@ -20,6 +20,7 @@ PROMPT_TEMPLATE = """You are a senior code reviewer. Review this single file cha
 
 File: {file_path}
 Project: {project_slug}
+Target branch: {branch}
 
 REVIEW RULES: Read these files for the checklist, then apply every rule:
 {rules_files}
@@ -31,7 +32,8 @@ INSTRUCTIONS:
 1. Read the rule files first, then analyze the diff for real bugs, security
    issues, or logic errors.
 2. Use your MCP tools (gerrit_file_read, gerrit_code_search, get_architecture,
-   search_graph) to verify referenced symbols and understand impact.
+   search_graph) to verify referenced symbols and understand impact. Resolve
+   file/symbol lookups against the target branch above, not the repo default.
 3. Do NOT flag style, naming, or cosmetic issues.
 4. If no real issues found, return [].
 
@@ -82,11 +84,14 @@ async def review_file(
     mcp_config_path: str,
     diff_cap: int = 8000,
     timeout: int = 1800,
+    *,
+    branch: str = "",
 ) -> list[ReviewComment]:
     """Review a single file. Returns parsed comments (empty on timeout/failure)."""
     prompt = PROMPT_TEMPLATE.format(
         file_path=file_path,
         project_slug=project_slug or "unknown",
+        branch=branch or "unknown",
         rules_files=" | ".join(rules_files) or "(no rule files)",
         diff=diff[:diff_cap],
     )

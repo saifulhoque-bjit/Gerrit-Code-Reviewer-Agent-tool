@@ -217,9 +217,10 @@ def create_app() -> FastAPI:
             await bus.publish(change_id, evt)
 
         if settings.review.strategy == "direct":
-            async def worker(*args):
+            async def worker(*args, branch: str = ""):
                 return await review_file_direct(
                     args[0], args[1], args[2], args[3], args[5], args[6],
+                    branch=branch,
                     base_url=settings.model.base_url, model=settings.model.name,
                     api_key=settings.secrets.model_api_key,
                 )

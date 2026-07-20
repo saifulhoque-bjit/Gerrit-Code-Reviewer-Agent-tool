@@ -48,7 +48,7 @@ class FakeGerrit:
         return f"--- a/{file_path}\n+new"
 
 
-async def fake_worker(path, diff, rules, slug, mcp, cap, timeout):
+async def fake_worker(path, diff, rules, slug, mcp, cap, timeout, *, branch=""):
     return [ReviewComment(file=path, line=1, comment="issue")]
 
 
