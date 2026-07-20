@@ -79,6 +79,11 @@ def test_history_feedback_and_effectiveness_endpoints(monkeypatch):
         assert history.status_code == 200
         assert history.json()["reviews"][0]["change_id"] == "100"
 
+        saved = client.get("/review/100?patchset=1", headers=HDR)
+        assert saved.status_code == 200
+        assert saved.json()["patchset"] == 1
+        assert saved.json()["comments"][0]["comment"] == "x"
+
         feedback = client.post(f"/comments/{comment_id}/feedback", headers=HDR, json={"feedback": "useful"})
         assert feedback.status_code == 200 and feedback.json()["feedback"] == "useful"
         effectiveness = client.get("/rules/effectiveness", headers=HDR)

@@ -111,6 +111,9 @@
   /* Change-view mode: ?change=<id> renders a dedicated full page (like v3's
      review.html) — hide the queue + controls, show only the workspace. */
   body.change-view .bar, body.change-view .hint, body.change-view #queuePanel { display: none; }
+  body.history-view .bar, body.history-view .hint, body.history-view #queuePanel,
+  body.history-view #workspace, body.history-view #status, body.history-view #postBar,
+  body.history-view #results { display: none; }
   .workspace-head { display: flex; align-items: center; gap: 10px; padding: 13px 15px; background: var(--surface); border-bottom: 1px solid var(--border); }
   .workspace-title { flex: 1; min-width: 0; font: 600 13px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .workspace-head button { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 7px 13px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all .15s; }
@@ -223,6 +226,15 @@
 
   .empty { color: var(--faint); text-align: center; padding: 48px; font-size: 14px; }
 
+  /* A saved review identifies a concrete patchset, so history navigates to a
+     dedicated detail view rather than replacing the current results panel. */
+  .history-list { display: flex; flex-direction: column; gap: 8px; }
+  .history-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); padding: 13px 15px; cursor: pointer; transition: border-color .15s, background .15s, transform .1s; }
+  .history-row:hover { border-color: var(--accent); background: var(--surface-2); transform: translateX(2px); }
+  .history-title { font: 600 13px var(--mono); }
+  .history-meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .history-count { color: var(--faint); font: 12px var(--mono); white-space: nowrap; }
+
   /* Select / edit / post workflow (like v3's Select All + Post to Gerrit). */
   .post-bar { display: none; align-items: center; gap: 10px; margin-bottom: 18px; padding: 11px 15px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
   .post-bar.show { display: flex; }
@@ -302,6 +314,13 @@
   </div>
   <p class="hint">Reviews stream in live as each file finishes.</p>
 
+  <section class="panel" id="historyPanel" hidden>
+    <div class="panel-head"><h2>Review history</h2>
+      <button class="panel-close" id="historyBack">Back to open changes</button></div>
+    <p class="panel-hint">Open a saved review to see that patchset’s diff and its persisted review comments.</p>
+    <div class="history-list" id="historyList"><div class="empty">Loading…</div></div>
+  </section>
+
   <section class="panel" id="analyticsPanel" hidden>
     <div class="panel-head"><h2>Rule effectiveness</h2>
       <button class="panel-close" data-close="analyticsPanel">Close</button></div>
@@ -369,7 +388,7 @@ const workspaceEl = $("workspace"), workspaceFiles = $("workspaceFiles"), diffPa
 
 let byFile = new Map();
 let totalFiles = 0, doneFiles = 0;
-let workspace = { changeId: "", files: [], activeFile: "", diffs: new Map() };
+let workspace = { changeId: "", patchset: null, files: [], activeFile: "", diffs: new Map() };
 let diffMode = "unified";  // "unified" | "split", toggled in the workspace head
 let currentChange = "";       // change id backing the current results (for posting)
 const deselected = new Set(); // comment ids the reviewer unchecked (default = post all)
@@ -392,6 +411,12 @@ function escAttr(s) {
 function changeLabel(change) {
   const number = change.number ? `#${change.number}` : change.change_id;
   return `${number} · ${change.project || "Unknown project"} · ${change.branch || "unknown branch"} · ${change.owner || "Unknown"}`;
+}
+
+function changeUrl(changeId, patchset = null) {
+  const params = new URLSearchParams({ change: changeId });
+  if (patchset != null) params.set("patchset", String(patchset));
+  return `/?${params}`;
 }
 
 function renderQueue(changes) {
@@ -506,17 +531,18 @@ function renderSplit(diff) {
     `<div class="split-pane"><div class="split-pane-head">After</div><table class="split-table"><tbody>${right}</tbody></table></div></div>`;
 }
 
-async function openWorkspace(changeId) {
-  workspace = { changeId, files: [], activeFile: "", diffs: new Map() };
+async function openWorkspace(changeId, patchset = null) {
+  workspace = { changeId, patchset, files: [], activeFile: "", diffs: new Map() };
   currentChange = changeId; deselected.clear();
   $("change").value = changeId;
-  $("workspaceTitle").textContent = `Change ${changeId}`;
+  $("workspaceTitle").textContent = `Change ${changeId}${patchset != null ? ` · patchset ${patchset}` : ""}`;
   workspaceEl.classList.add("show");
   workspaceFiles.innerHTML = '<div class="diff-empty">Loading files…</div>';
   diffPane.innerHTML = '<div class="diff-empty">Choose a file to inspect its diff.</div>';
-  loadExistingReview(changeId);
+  loadExistingReview(changeId, patchset);
   try {
-    const response = await fetch(`/gerrit/changes/${encodeURIComponent(changeId)}/files`);
+    const revision = patchset != null ? `?patchset=${encodeURIComponent(patchset)}` : "";
+    const response = await fetch(`/gerrit/changes/${encodeURIComponent(changeId)}/files${revision}`);
     if (!response.ok) throw new Error(`Could not load files (${response.status})`);
     workspace.files = (await response.json()).files || [];
     workspace.activeFile = workspace.files[0]?.path || "";
@@ -529,9 +555,10 @@ async function openWorkspace(changeId) {
 
 // Hydrate results from a prior review (if any) so posted/edited state survives
 // a reload into the change view — otherwise the panel starts empty.
-async function loadExistingReview(changeId) {
+async function loadExistingReview(changeId, patchset = null) {
   try {
-    const r = await fetch(`/review/${encodeURIComponent(changeId)}`);
+    const revision = patchset != null ? `?patchset=${encodeURIComponent(patchset)}` : "";
+    const r = await fetch(`/review/${encodeURIComponent(changeId)}${revision}`);
     if (!r.ok) return;
     const data = await r.json();
     if (!data || data.status !== "done") return;
@@ -551,7 +578,8 @@ async function loadWorkspaceDiff(filePath) {
   if (!workspace.diffs.has(filePath)) {
     diffPane.innerHTML = '<div class="diff-empty">Loading diff…</div>';
     try {
-      const response = await fetch(`/gerrit/changes/${encodeURIComponent(workspace.changeId)}/files/${encodeURIComponent(filePath)}/diff`);
+      const revision = workspace.patchset != null ? `?patchset=${encodeURIComponent(workspace.patchset)}` : "";
+      const response = await fetch(`/gerrit/changes/${encodeURIComponent(workspace.changeId)}/files/${encodeURIComponent(filePath)}/diff${revision}`);
       if (!response.ok) throw new Error(`Could not load diff (${response.status})`);
       workspace.diffs.set(filePath, (await response.json()).diff || "");
     } catch (error) {
@@ -619,6 +647,9 @@ async function start() {
 
   byFile = new Map(); doneFiles = 0; totalFiles = 0;
   currentChange = change; deselected.clear();
+  // A completed review is persisted in SQLite. Keep its identity in the URL so
+  // reloading the browser knows which durable review to hydrate.
+  window.history.replaceState({}, "", changeUrl(change));
   results.innerHTML = '<div class="loading"><div class="ring"></div><span>Reviewing change ' + esc(change) + '…</span></div>';
   $("go").disabled = true;
   $("go").innerHTML = '<span class="spinner"></span>';
@@ -655,6 +686,7 @@ async function start() {
       }
       render();
       renderWorkspaceDiff();
+      if (evt.patchset != null) window.history.replaceState({}, "", changeUrl(change, evt.patchset));
       endRun(es); scrollToBottom();
     } else if (evt.type === "error") {
       setStatus("err", "Error", evt.error || "");
@@ -729,15 +761,31 @@ $("closeWorkspace").addEventListener("click", () => {
   if (document.body.classList.contains("change-view")) window.location.href = "/";
   else workspaceEl.classList.remove("show");
 });
-$("history").addEventListener("click", async () => {
-  const r = await fetch("/reviews");
-  const data = await r.json();
-  results.innerHTML = (data.reviews || []).map((x) =>
-    `<div class="comment"><div class="top"><span class="sev ${x.status === "done" ? "suggestion" : "warning"}">${esc(x.status)}</span>` +
-    `<span class="loc">${esc(x.change_id)} · ps${x.patchset}</span></div>` +
-    `<div class="body">${x.comment_count} comments · ${x.files_reviewed} files · $${Number(x.cost_usd).toFixed(4)}</div></div>`
-  ).join("") || '<div class="empty">No review history.</div>';
-  setStatus("done", "Review history", `${(data.reviews || []).length} reviews`);
+$("history").addEventListener("click", () => { window.location.href = "/?page=history"; });
+$("historyBack").addEventListener("click", () => { window.location.href = "/"; });
+
+async function loadHistoryPage() {
+  const list = $("historyList");
+  list.innerHTML = '<div class="empty">Loading saved reviews…</div>';
+  try {
+    const response = await fetch("/reviews");
+    if (!response.ok) throw new Error(`Could not load history (${response.status})`);
+    const reviews = (await response.json()).reviews || [];
+    list.innerHTML = reviews.map((review) =>
+      `<button class="history-row" data-history-change="${escAttr(review.change_id)}" data-history-patchset="${review.patchset}">` +
+      `<span><span class="history-title">Change ${esc(review.change_id)} · patchset ${review.patchset}</span>` +
+      `<span class="history-meta">${esc(review.project_slug || "Unknown project")} · ${esc(review.branch || "unknown branch")} · ${esc(review.created_at || "")}</span></span>` +
+      `<span class="history-count">${review.comment_count} comments · ${review.files_reviewed} files</span></button>`
+    ).join("") || '<div class="empty">No saved reviews yet.</div>';
+  } catch (error) {
+    list.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+  }
+}
+
+$("historyList").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-history-change]");
+  if (!row) return;
+  window.location.href = changeUrl(row.dataset.historyChange, Number(row.dataset.historyPatchset));
 });
 results.addEventListener("click", async (e) => {
   const feedbackBtn = e.target.closest("[data-feedback]");
@@ -953,14 +1001,21 @@ async function saveRuleFile(path) {
   }
 }
 
-const inspectChange = new URLSearchParams(window.location.search).get("change");
+const pageParams = new URLSearchParams(window.location.search);
+const inspectChange = pageParams.get("change");
+const inspectPatchset = Number(pageParams.get("patchset")) || null;
+const historyPage = pageParams.get("page") === "history";
 fetch("/auth/status").then((r) => r.json()).then((data) => {
   if (!data.authenticated) window.location.replace("/login.html");
   else if (inspectChange) {
     // Dedicated change view (like v3's review.html): full-page workspace, no queue.
     document.body.classList.add("change-view");
     loadProjects();
-    openWorkspace(inspectChange);
+    openWorkspace(inspectChange, inspectPatchset);
+  } else if (historyPage) {
+    document.body.classList.add("history-view");
+    $("historyPanel").removeAttribute("hidden");
+    loadHistoryPage();
   } else {
     loadProjects().then(loadQueue);
   }

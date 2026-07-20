@@ -91,12 +91,15 @@ class GerritClient:
             "status": str(change.get("status") or "NEW"),
         } for change in data]
 
-    async def changed_files(self, change_id: str, base: int | None = None) -> list[ChangedFile]:
+    async def changed_files(
+        self, change_id: str, base: int | None = None, revision: int | None = None,
+    ) -> list[ChangedFile]:
         # base set → only files changed BETWEEN that patchset and current
         # (the engine's incremental-review path uses this to skip untouched files).
         q = f"?base={base}" if base else ""
+        revision_ref = str(revision) if revision is not None else "current"
         data = await self._get_json(
-            f"/a/changes/{change_id}/revisions/current/files{q}"
+            f"/a/changes/{change_id}/revisions/{revision_ref}/files{q}"
         )
         return [
             ChangedFile(
@@ -109,11 +112,14 @@ class GerritClient:
             if p != "/COMMIT_MSG"
         ]
 
-    async def file_diff(self, change_id: str, file_path: str) -> str:
+    async def file_diff(
+        self, change_id: str, file_path: str, revision: int | None = None,
+    ) -> str:
         from urllib.parse import quote
         p = quote(file_path, safe="")
+        revision_ref = str(revision) if revision is not None else "current"
         data = await self._get_json(
-            f"/a/changes/{change_id}/revisions/current/files/{p}/diff"
+            f"/a/changes/{change_id}/revisions/{revision_ref}/files/{p}/diff"
         )
         return gerrit_diff_to_unified(file_path, data.get("content", []))
 

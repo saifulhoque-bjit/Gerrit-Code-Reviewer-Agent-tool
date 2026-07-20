@@ -23,7 +23,8 @@ def test_inspect_opens_a_dedicated_change_page():
     assert "window.open(" not in dashboard
     # ?change= reloads into a dedicated full-page view (v3's review.html feel):
     # the queue + controls hide, only the workspace shows.
-    assert 'new URLSearchParams(window.location.search).get("change")' in dashboard
+    assert 'const pageParams = new URLSearchParams(window.location.search);' in dashboard
+    assert 'const inspectChange = pageParams.get("change");' in dashboard
     assert 'document.body.classList.add("change-view")' in dashboard
     assert "body.change-view #queuePanel { display: none; }" in dashboard
 
@@ -86,3 +87,18 @@ def test_dashboard_has_loader_autoscroll_and_reveal():
     assert "function revealFinding(" in dashboard
     assert "data-finding-line" in dashboard
     assert "pulse" in dashboard
+
+
+def test_dashboard_has_durable_reload_and_dedicated_history_navigation():
+    from reviewer.app import STATIC_DIR
+
+    dashboard = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # A completed review gets a stable detail URL; reload hydrates the DB result.
+    assert "window.history.replaceState({}, \"\", changeUrl(change))" in dashboard
+    assert "loadExistingReview(changeId, patchset)" in dashboard
+    # History is its own page, and each stored patchset opens its own detail URL.
+    assert 'window.location.href = \"/?page=history\"' in dashboard
+    assert 'id="historyPanel"' in dashboard and "function loadHistoryPage()" in dashboard
+    assert "data-history-patchset" in dashboard
+    assert "history-view" in dashboard

@@ -24,6 +24,7 @@ from .gerrit import GerritClient
 from .rules import list_rule_files, read_rule_file, write_rule_file
 from .settings import Settings, basic_auth_header, get_settings
 from .store import (
+    get_review,
     get_latest_review,
     review_history,
     update_comment_text,
@@ -191,23 +192,30 @@ def create_app() -> FastAPI:
             return {"changes": await gerrit.open_changes(project.strip(), limit)}
 
     @app.get("/gerrit/changes/{change_id}/files")
-    async def gerrit_change_files(change_id: str, auth: str = Depends(require_token)) -> dict:
-        """List changed files for the interactive diff workspace."""
+    async def gerrit_change_files(
+        change_id: str, patchset: int | None = Query(default=None, ge=1),
+        auth: str = Depends(require_token),
+    ) -> dict:
+        """List changed files for the current or a persisted historical patchset."""
         async with GerritClient(
             settings.gerrit.url, auth, settings.gerrit.ca_bundle, settings.gerrit.timeout_seconds,
         ) as gerrit:
-            files = await gerrit.changed_files(change_id)
+            files = await gerrit.changed_files(change_id, revision=patchset)
             return {"files": [file.model_dump() for file in files]}
 
     @app.get("/gerrit/changes/{change_id}/files/{file_path:path}/diff")
     async def gerrit_file_diff(
-        change_id: str, file_path: str, auth: str = Depends(require_token),
+        change_id: str, file_path: str, patchset: int | None = Query(default=None, ge=1),
+        auth: str = Depends(require_token),
     ) -> dict:
         """Get one file's normalized unified diff on demand."""
         async with GerritClient(
             settings.gerrit.url, auth, settings.gerrit.ca_bundle, settings.gerrit.timeout_seconds,
         ) as gerrit:
-            return {"path": file_path, "diff": await gerrit.file_diff(change_id, file_path)}
+            return {
+                "path": file_path,
+                "diff": await gerrit.file_diff(change_id, file_path, revision=patchset),
+            }
 
     async def _do_review(change_id: str, project_slug: str, auth: str) -> None:
         """Background job: run the engine against a real Gerrit + hermes worker."""
@@ -252,8 +260,10 @@ def create_app() -> FastAPI:
         return {"status": "started", "change_id": change_id}
 
     @app.get("/review/{change_id}", dependencies=[Depends(require_token)])
-    def get_review_endpoint(change_id: str) -> dict:
-        result = get_latest_review(app.state.conn, change_id)
+    def get_review_endpoint(change_id: str, patchset: int | None = Query(default=None, ge=1)) -> dict:
+        result = get_latest_review(app.state.conn, change_id) if patchset is None else get_review(
+            app.state.conn, change_id, patchset,
+        )
         if result is None:
             return {"status": "not_started", "change_id": change_id}
         return result
