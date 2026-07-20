@@ -1,0 +1,39 @@
+# Non-secret configuration. Secrets live in .env (see .env.example).
+
+[gerrit]
+url = "https://review2.bjitgroup.com:8443"
+# Path to internal CA bundle for TLS verification. Empty = system trust store.
+# Set this instead of disabling verification (v3 used CERT_NONE everywhere).
+ca_bundle = ""
+timeout_seconds = 30
+
+[server]
+host = "127.0.0.1"
+port = 7474
+
+[review]
+max_workers = 4
+worker_timeout_seconds = 1800
+diff_cap_chars = 8000
+# Worker strategy: "hermes" (MCP tools) or "direct" (API loop, real token counts).
+strategy = "hermes"
+# Incremental: skip files unchanged since the last reviewed patchset.
+incremental = true
+
+[post]
+# Auto-vote Code-Review when posting (error → -1, else 0). Off by default —
+# posting a vote is a side effect the user should opt into.
+auto_vote = false
+vote_label = "Code-Review"
+
+[cost]
+# Priced against the configured model, not hardcoded Claude rates (v3 bug).
+input_per_1m_usd = 0.30
+output_per_1m_usd = 0.30
+chars_per_token = 4
+
+[model]
+# Strategy B (direct-API worker) target. OpenAI-compatible /chat/completions.
+# Key comes from MODEL_API_KEY in .env, never here.
+base_url = "https://api.xiaomimimo.com/v1"
+name = "mimo-v2.5-pro"

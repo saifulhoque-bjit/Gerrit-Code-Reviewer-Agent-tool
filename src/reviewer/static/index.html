@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gerrit Reviewer</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --surface: #161b22;
+    --surface-2: #1c2230;
+    --border: #2a313c;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #4c8dff;
+    --error: #f85149;
+    --warning: #d29922;
+    --suggestion: #3fb950;
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    border-bottom: 1px solid var(--border); padding: 20px 28px;
+    display: flex; align-items: baseline; gap: 14px;
+  }
+  header h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { max-width: 1120px; margin: 0 auto; padding: 32px 28px 80px; }
+
+  .bar { display: flex; gap: 10px; align-items: stretch; margin-bottom: 8px; }
+  .bar input {
+    flex: 1; background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); border-radius: var(--radius); padding: 11px 14px;
+    font-size: 14px; font-family: var(--mono);
+  }
+  .bar input:focus { outline: none; border-color: var(--accent); }
+  .bar button {
+    background: var(--accent); color: #fff; border: none; cursor: pointer;
+    border-radius: var(--radius); padding: 0 20px; font-size: 14px; font-weight: 600;
+  }
+  .bar button:disabled { opacity: 0.45; cursor: default; }
+  .bar button.secondary, .feedback button { background: var(--surface-2); border: 1px solid var(--border); }
+  .bar select {
+    max-width: 250px; background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); border-radius: var(--radius); padding: 0 12px; font-size: 13px;
+  }
+  .hint { color: var(--muted); font-size: 12px; margin: 0 0 28px; }
+
+  .queue { margin: 0 0 28px; }
+  .queue-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .queue h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  .queue .meta { color: var(--muted); font-size: 12px; }
+  .change-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 8px;
+  }
+  .change-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .change-detail { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .change-row button { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+  .change-row button:hover { border-color: var(--accent); color: var(--accent); }
+
+  .workspace { display: none; margin: 0 0 28px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .workspace.show { display: block; }
+  .workspace-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .workspace-title { flex: 1; min-width: 0; font: 600 13px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .workspace-head button { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+  .workspace-head button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .workspace-body { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 360px; }
+  .files { background: var(--surface); border-right: 1px solid var(--border); overflow: auto; }
+  .file-tab { width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid rgba(42,49,60,.65); background: transparent; color: var(--muted); cursor: pointer; text-align: left; font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-tab:hover, .file-tab.active { background: var(--surface-2); color: var(--text); }
+  .file-tab .stat { float: right; font-family: var(--sans); color: var(--suggestion); }
+  .diff-pane { min-width: 0; overflow: auto; background: #10151d; }
+  .diff { margin: 0; padding: 12px 0; font: 12px/1.55 var(--mono); tab-size: 4; }
+  .diff-line { display: block; min-height: 19px; padding: 0 14px; white-space: pre; }
+  .diff-line.add { background: rgba(63,185,80,.12); color: #b7e3c1; }
+  .diff-line.del { background: rgba(248,81,73,.11); color: #ffc4c2; }
+  .diff-line.hunk { color: #9cc2ff; background: rgba(76,141,255,.08); }
+  .diff-line.finding { box-shadow: inset 3px 0 0 var(--warning); background-image: linear-gradient(90deg, rgba(210,153,34,.18), transparent 55%); }
+  .diff-line.finding.error { box-shadow: inset 3px 0 0 var(--error); }
+  .diff-empty { color: var(--muted); padding: 28px; font-size: 13px; }
+  @media (max-width: 700px) { .workspace-body { grid-template-columns: 1fr; } .files { border-right: 0; border-bottom: 1px solid var(--border); max-height: 150px; } }
+
+  .status {
+    display: none; align-items: center; gap: 12px; margin-bottom: 24px;
+    padding: 14px 16px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); font-size: 13px;
+  }
+  .status.show { display: flex; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.live { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  .dot.done { background: var(--suggestion); }
+  .dot.err { background: var(--error); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .status .grow { flex: 1; }
+  .status .meta { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+  .file-group { margin-bottom: 20px; }
+  .file-head {
+    font-family: var(--mono); font-size: 13px; color: var(--text);
+    padding: 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .file-head .count { color: var(--muted); font-size: 12px; }
+
+  .comment {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--muted); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 10px;
+    animation: slidein 0.25s ease;
+  }
+  @keyframes slidein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+  .comment.error { border-left-color: var(--error); }
+  .comment.warning { border-left-color: var(--warning); }
+  .comment.suggestion { border-left-color: var(--suggestion); }
+  .comment .top { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+  .sev {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 2px 7px; border-radius: 5px;
+  }
+  .sev.error { background: rgba(248,81,73,0.15); color: var(--error); }
+  .sev.warning { background: rgba(210,153,34,0.15); color: var(--warning); }
+  .sev.suggestion { background: rgba(63,185,80,0.15); color: var(--suggestion); }
+  .comment .loc { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .comment .body { font-size: 14px; }
+  .feedback { display: flex; gap: 6px; margin-top: 10px; }
+  .feedback button { color: var(--muted); border-radius: 5px; padding: 3px 7px; cursor: pointer; font-size: 12px; }
+  .feedback button.selected { color: var(--text); border-color: var(--accent); }
+  .comment pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px;
+    margin: 8px 0 0;
+  }
+  .comment pre.suggest { border-color: rgba(63,185,80,0.4); }
+
+  .empty { color: var(--muted); text-align: center; padding: 40px; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Gerrit Reviewer</h1>
+  <span class="sub">v4 — live AI code review</span>
+</header>
+<main>
+  <div class="bar">
+    <input id="change" placeholder="Change number or ID (e.g. 198601)" autocomplete="off">
+    <button id="go">Review</button>
+    <button id="history" class="secondary">History</button>
+  </div>
+  <div class="bar">
+    <select id="project" aria-label="Gerrit project"><option value="">All projects</option></select>
+    <button id="queue" class="secondary">Open changes</button>
+  </div>
+  <p class="hint">Reviews stream in live as each file finishes.</p>
+
+  <section class="queue" id="queuePanel">
+    <div class="queue-head"><h2>Open changes</h2><span class="meta" id="queueMeta">Loading…</span></div>
+    <div id="changeQueue"></div>
+  </section>
+
+  <section class="workspace" id="workspace" aria-label="Change diff workspace">
+    <div class="workspace-head">
+      <span class="workspace-title" id="workspaceTitle">Change files</span>
+      <button id="closeWorkspace">Close</button>
+      <button id="workspaceReview" class="primary">Review change</button>
+    </div>
+    <div class="workspace-body">
+      <div class="files" id="workspaceFiles"></div>
+      <div class="diff-pane" id="diffPane"><div class="diff-empty">Choose a file to inspect its diff.</div></div>
+    </div>
+  </section>
+
+  <div class="status" id="status">
+    <span class="dot" id="dot"></span>
+    <span class="grow" id="statusText">Idle</span>
+    <span class="meta" id="statusMeta"></span>
+  </div>
+
+  <div id="results"></div>
+</main>
+
+<script>
+// ponytail: vanilla JS, no framework. State is a Map of file -> comment list,
+// rendered from scratch on each event. Small N; re-render is simpler than diffing.
+const $ = (id) => document.getElementById(id);
+const results = $("results"), statusEl = $("status"), dot = $("dot");
+const statusText = $("statusText"), statusMeta = $("statusMeta");
+const projectSelect = $("project"), changeQueue = $("changeQueue"), queueMeta = $("queueMeta");
+const workspaceEl = $("workspace"), workspaceFiles = $("workspaceFiles"), diffPane = $("diffPane");
+
+let byFile = new Map();
+let totalFiles = 0, doneFiles = 0;
+let workspace = { changeId: "", files: [], activeFile: "", diffs: new Map() };
+
+function setStatus(state, text, meta = "") {
+  statusEl.classList.add("show");
+  dot.className = "dot " + state;
+  statusText.textContent = text;
+  statusMeta.textContent = meta;
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+function escAttr(s) {
+  return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function changeLabel(change) {
+  const number = change.number ? `#${change.number}` : change.change_id;
+  return `${number} · ${change.project || "Unknown project"} · ${change.branch || "unknown branch"} · ${change.owner || "Unknown"}`;
+}
+
+function renderQueue(changes) {
+  queueMeta.textContent = `${changes.length} open change${changes.length === 1 ? "" : "s"}`;
+  changeQueue.innerHTML = changes.map((change, index) =>
+    `<div class="change-row"><div><div class="change-title">${esc(change.subject || "(no subject)")}</div>` +
+    `<div class="change-detail">${esc(changeLabel(change))}</div></div>` +
+    `<button data-review-change="${index}">Inspect</button></div>`
+  ).join("") || '<div class="empty">No open changes found.</div>';
+  changeQueue._changes = changes;
+}
+
+async function loadQueue() {
+  queueMeta.textContent = "Loading…";
+  const project = projectSelect.value;
+  const query = project ? `?project=${encodeURIComponent(project)}` : "";
+  try {
+    const response = await fetch(`/gerrit/changes/open${query}`);
+    if (!response.ok) throw new Error(`Could not load changes (${response.status})`);
+    renderQueue((await response.json()).changes || []);
+  } catch (error) {
+    queueMeta.textContent = "Unavailable";
+    changeQueue.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+  }
+}
+
+async function loadProjects() {
+  try {
+    const response = await fetch("/gerrit/projects");
+    if (!response.ok) return;
+    const projects = (await response.json()).projects || [];
+    projectSelect.innerHTML = '<option value="">All projects</option>' + projects.map((project) =>
+      `<option value="${escAttr(project)}">${esc(project)}</option>`
+    ).join("");
+  } catch (_) {
+    // The change queue remains usable even when project discovery is unavailable.
+  }
+}
+
+function renderWorkspaceFiles() {
+  workspaceFiles.innerHTML = workspace.files.map((file) =>
+    `<button class="file-tab ${file.path === workspace.activeFile ? "active" : ""}" data-workspace-file="${escAttr(file.path)}">` +
+    `${esc(file.path)}<span class="stat">+${file.lines_inserted} −${file.lines_deleted}</span></button>`
+  ).join("") || '<div class="diff-empty">No files changed.</div>';
+}
+
+function findingAt(file, line) {
+  return (byFile.get(file) || []).find((comment) => Number(comment.line) === line);
+}
+
+function renderWorkspaceDiff() {
+  const diff = workspace.diffs.get(workspace.activeFile);
+  if (diff == null) return;
+  let newLine = 0;
+  const lines = diff.split("\n").map((line) => {
+    let kind = "", finding = null;
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
+    if (hunk) { newLine = Number(hunk[1]); kind = "hunk"; }
+    else if (line.startsWith("+")) { kind = "add"; finding = findingAt(workspace.activeFile, newLine++); }
+    else if (line.startsWith("-")) kind = "del";
+    else if (!line.startsWith("\\")) { finding = findingAt(workspace.activeFile, newLine++); }
+    const severity = finding?.severity === "error" ? "error" : "";
+    const title = finding ? ` title="${escAttr(finding.comment)}"` : "";
+    return `<span class="diff-line ${kind}${finding ? ` finding ${severity}` : ""}"${title}>${esc(line)}</span>`;
+  }).join("");
+  diffPane.innerHTML = `<pre class="diff">${lines}</pre>`;
+}
+
+async function openWorkspace(changeId) {
+  workspace = { changeId, files: [], activeFile: "", diffs: new Map() };
+  $("change").value = changeId;
+  $("workspaceTitle").textContent = `Change ${changeId}`;
+  workspaceEl.classList.add("show");
+  workspaceFiles.innerHTML = '<div class="diff-empty">Loading files…</div>';
+  diffPane.innerHTML = '<div class="diff-empty">Choose a file to inspect its diff.</div>';
+  try {
+    const response = await fetch(`/gerrit/changes/${encodeURIComponent(changeId)}/files`);
+    if (!response.ok) throw new Error(`Could not load files (${response.status})`);
+    workspace.files = (await response.json()).files || [];
+    workspace.activeFile = workspace.files[0]?.path || "";
+    renderWorkspaceFiles();
+    if (workspace.activeFile) await loadWorkspaceDiff(workspace.activeFile);
+  } catch (error) {
+    workspaceFiles.innerHTML = `<div class="diff-empty">${esc(error.message)}</div>`;
+  }
+}
+
+async function loadWorkspaceDiff(filePath) {
+  workspace.activeFile = filePath;
+  renderWorkspaceFiles();
+  if (!workspace.diffs.has(filePath)) {
+    diffPane.innerHTML = '<div class="diff-empty">Loading diff…</div>';
+    try {
+      const response = await fetch(`/gerrit/changes/${encodeURIComponent(workspace.changeId)}/files/${encodeURIComponent(filePath)}/diff`);
+      if (!response.ok) throw new Error(`Could not load diff (${response.status})`);
+      workspace.diffs.set(filePath, (await response.json()).diff || "");
+    } catch (error) {
+      diffPane.innerHTML = `<div class="diff-empty">${esc(error.message)}</div>`;
+      return;
+    }
+  }
+  renderWorkspaceDiff();
+}
+
+function render() {
+  if (byFile.size === 0) {
+    results.innerHTML = '<div class="empty">No comments yet.</div>';
+    return;
+  }
+  let html = "";
+  for (const [file, comments] of byFile) {
+    if (!comments.length) continue;
+    html += `<div class="file-group"><div class="file-head"><span>${esc(file)}</span>` +
+            `<span class="count">${comments.length} comment${comments.length > 1 ? "s" : ""}</span></div>`;
+    for (const c of comments) {
+      const sev = ["error", "warning", "suggestion"].includes(c.severity) ? c.severity : "suggestion";
+      html += `<div class="comment ${sev}"><div class="top">` +
+        `<span class="sev ${sev}">${sev}</span>` +
+        `<span class="loc">${esc(c.file)}:${c.line || 0}</span></div>` +
+        `<div class="body">${esc(c.comment)}</div>`;
+      if (c.existing_code) html += `<pre>${esc(c.existing_code)}</pre>`;
+      if (c.suggestion_code) html += `<pre class="suggest">${esc(c.suggestion_code)}</pre>`;
+      if (c.id) html += `<div class="feedback" data-comment="${c.id}">` +
+        `<button data-feedback="useful" class="${c.feedback === "useful" ? "selected" : ""}">Useful</button>` +
+        `<button data-feedback="dismissed" class="${c.feedback === "dismissed" ? "selected" : ""}">Dismiss</button></div>`;
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+  results.innerHTML = html || '<div class="empty">No issues found. LGTM.</div>';
+}
+
+async function start() {
+  const change = $("change").value.trim();
+  if (!change) { $("change").focus(); return; }
+
+  byFile = new Map(); doneFiles = 0; totalFiles = 0;
+  render();
+  $("go").disabled = true;
+  setStatus("live", "Connecting…");
+
+  // Subscribe to the stream FIRST so we never miss the "started" event,
+  // then kick off the review. (POST starts a background task immediately.)
+  const es = new EventSource(`/review/${encodeURIComponent(change)}/stream`);
+
+  es.onmessage = (m) => {
+    const evt = JSON.parse(m.data);
+    if (evt.type === "started") {
+      totalFiles = evt.total_files || 0;
+      setStatus("live", "Reviewing…", `0 / ${totalFiles} files`);
+    } else if (evt.type === "file") {
+      doneFiles++;
+      if (evt.comments && evt.comments.length) {
+        byFile.set(evt.file, evt.comments);
+        render();
+      }
+      setStatus("live", "Reviewing…", `${doneFiles} / ${totalFiles} files`);
+    } else if (evt.type === "done") {
+      const n = (evt.comments || []).length;
+      const cost = evt.cost_usd != null ? ` · $${Number(evt.cost_usd).toFixed(4)}` : "";
+      setStatus("done", `Done — ${n} comment${n === 1 ? "" : "s"}`, `${evt.files_reviewed || 0} files${cost}`);
+      // Final authoritative render from the persisted, deduped result.
+      byFile = new Map();
+      for (const c of (evt.comments || [])) {
+        if (!byFile.has(c.file)) byFile.set(c.file, []);
+        byFile.get(c.file).push(c);
+      }
+      render();
+      renderWorkspaceDiff();
+      es.close(); $("go").disabled = false;
+    } else if (evt.type === "error") {
+      setStatus("err", "Error", evt.error || "");
+      es.close(); $("go").disabled = false;
+    }
+  };
+  es.onerror = () => {
+    setStatus("err", "Stream disconnected", "");
+    es.close(); $("go").disabled = false;
+  };
+
+  // Now start the review.
+  try {
+    const r = await fetch(`/review/${encodeURIComponent(change)}`, {
+      method: "POST",
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      setStatus("err", `Could not start (${r.status})`, body.detail || "");
+      es.close(); $("go").disabled = false;
+    }
+  } catch (e) {
+    setStatus("err", "Request failed", String(e));
+    es.close(); $("go").disabled = false;
+  }
+}
+
+$("go").addEventListener("click", start);
+$("change").addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
+$("queue").addEventListener("click", loadQueue);
+projectSelect.addEventListener("change", loadQueue);
+changeQueue.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-review-change]");
+  if (!button) return;
+  const change = changeQueue._changes?.[Number(button.dataset.reviewChange)];
+  if (!change) return;
+  const changeId = String(change.number || change.change_id);
+  window.open(`/?change=${encodeURIComponent(changeId)}`, "_blank", "noopener");
+});
+workspaceFiles.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-workspace-file]");
+  if (button) loadWorkspaceDiff(button.dataset.workspaceFile);
+});
+$("workspaceReview").addEventListener("click", start);
+$("closeWorkspace").addEventListener("click", () => workspaceEl.classList.remove("show"));
+$("history").addEventListener("click", async () => {
+  const r = await fetch("/reviews");
+  const data = await r.json();
+  results.innerHTML = (data.reviews || []).map((x) =>
+    `<div class="comment"><div class="top"><span class="sev ${x.status === "done" ? "suggestion" : "warning"}">${esc(x.status)}</span>` +
+    `<span class="loc">${esc(x.change_id)} · ps${x.patchset}</span></div>` +
+    `<div class="body">${x.comment_count} comments · ${x.files_reviewed} files · $${Number(x.cost_usd).toFixed(4)}</div></div>`
+  ).join("") || '<div class="empty">No review history.</div>';
+  setStatus("done", "Review history", `${(data.reviews || []).length} reviews`);
+});
+results.addEventListener("click", async (e) => {
+  const button = e.target.closest("[data-feedback]");
+  if (!button) return;
+  const id = button.parentElement.dataset.comment;
+  const r = await fetch(`/comments/${id}/feedback`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({feedback: button.dataset.feedback})});
+  if (r.ok) button.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("selected", b === button));
+});
+
+const inspectChange = new URLSearchParams(window.location.search).get("change");
+fetch("/auth/status").then((r) => r.json()).then((data) => {
+  if (!data.authenticated) window.location.replace("/login.html");
+  else {
+    loadProjects().then(loadQueue);
+    if (inspectChange) openWorkspace(inspectChange);
+  }
+});
+</script>
+</body>
+</html>

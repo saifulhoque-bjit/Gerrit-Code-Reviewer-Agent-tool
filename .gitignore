@@ -1,0 +1,21 @@
+# secrets & local config
+.env
+config.local.toml
+
+# runtime state
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.log
+data/
+temp/
+
+# cloned gerrit repos
+projects/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/

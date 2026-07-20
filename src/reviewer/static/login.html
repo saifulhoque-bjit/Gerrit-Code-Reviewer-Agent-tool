@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Gerrit Reviewer</title>
+<style>
+  :root { --bg:#0e1116; --surface:#161b22; --border:#2a313c; --text:#e6edf3; --muted:#8b949e; --accent:#4c8dff; --error:#f85149; }
+  * { box-sizing:border-box; }
+  body { min-height:100vh; margin:0; display:grid; place-items:center; background:var(--bg); color:var(--text); font:14px system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .card { width:min(420px,calc(100vw - 32px)); padding:32px; background:var(--surface); border:1px solid var(--border); border-radius:12px; }
+  h1 { margin:0 0 6px; font-size:20px; } p { color:var(--muted); margin:0 0 28px; line-height:1.5; }
+  label { display:block; margin:16px 0 6px; font-weight:600; }
+  input { width:100%; padding:11px 12px; color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:8px; font:inherit; }
+  input:focus { outline:none; border-color:var(--accent); }
+  button { width:100%; margin-top:22px; padding:11px; border:0; border-radius:8px; cursor:pointer; background:var(--accent); color:#fff; font:600 14px inherit; }
+  button:disabled { opacity:.6; cursor:default; } .error { min-height:20px; margin-top:14px; color:var(--error); }
+  .hint { margin-top:24px; margin-bottom:0; font-size:12px; } a { color:#79a9ff; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Gerrit Reviewer</h1>
+  <p>Sign in with your Gerrit HTTP credentials to start reviewing changes.</p>
+  <form id="login-form">
+    <label for="username">Username</label>
+    <input id="username" autocomplete="username" required autofocus>
+    <label for="http-password">HTTP password</label>
+    <input id="http-password" type="password" autocomplete="current-password" required>
+    <button id="submit" type="submit">Sign in</button>
+    <div id="error" class="error" role="alert"></div>
+  </form>
+  <p class="hint">Use your Gerrit <strong>HTTP password</strong>, not your LDAP password. It is validated once and never saved in browser storage.</p>
+</main>
+<script>
+const form = document.getElementById("login-form"), submit = document.getElementById("submit"), error = document.getElementById("error");
+
+fetch("/auth/status").then((r) => r.json()).then((data) => {
+  if (data.authenticated) window.location.replace("/");
+});
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  error.textContent = "";
+  submit.disabled = true;
+  submit.textContent = "Signing in…";
+  try {
+    const response = await fetch("/auth/login", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        username: document.getElementById("username").value.trim(),
+        http_password: document.getElementById("http-password").value,
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      error.textContent = body.detail || "Could not sign in.";
+      return;
+    }
+    document.getElementById("http-password").value = "";
+    window.location.replace("/");
+  } catch (_) {
+    error.textContent = "Could not reach the local reviewer service.";
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "Sign in";
+  }
+});
+</script>
+</body>
+</html>

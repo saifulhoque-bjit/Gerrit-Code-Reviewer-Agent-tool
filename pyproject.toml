@@ -1,0 +1,26 @@
+[project]
+name = "gerrit-reviewer"
+version = "0.4.0"
+description = "AI-powered Gerrit code review — v4 async rewrite"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.uv]
+package = false
+
+# ponytail: stdlib sqlite3 + tomllib (3.11+) instead of SQLAlchemy/Redis/Celery.
+# Add an ORM only when raw SQL measurably hurts.
