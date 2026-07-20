@@ -55,3 +55,19 @@ def test_dashboard_has_select_edit_post_workflow():
     # Posts only the selected ids, and edits persist over PATCH.
     assert "comment_ids: ids" in dashboard
     assert 'method: "PATCH"' in dashboard
+
+
+def test_dashboard_has_rules_and_analytics_panels():
+    from reviewer.app import STATIC_DIR
+
+    dashboard = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # Nav entry points + panels.
+    assert 'id="rulesBtn"' in dashboard and 'id="analyticsBtn"' in dashboard
+    assert 'id="rulesPanel"' in dashboard and 'id="analyticsPanel"' in dashboard
+    # Rules browse/read/save wiring.
+    assert 'fetch("/rules")' in dashboard
+    assert "/rules/file?path=" in dashboard
+    assert 'method: "PUT"' in dashboard
+    # Analytics reads the effectiveness endpoint.
+    assert 'fetch("/rules/effectiveness")' in dashboard

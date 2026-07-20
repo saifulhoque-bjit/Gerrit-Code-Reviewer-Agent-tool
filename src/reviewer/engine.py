@@ -119,7 +119,7 @@ async def run_review(
     diffs = await asyncio.gather(*(gerrit.file_diff(change_id, f.path) for f in to_review))
     file_diffs = {f.path: d for f, d in zip(to_review, diffs) if d.strip()}
 
-    rules_dir = rules_dir or Path("rules")
+    rules_dir = rules_dir or settings.review.rules_path()
     rule_paths = [str(p) for p in resolve_rule_paths(rules_dir, list(file_diffs), project_slug)]
     mcp_config = _write_mcp_config(settings, change_id, auth, "")
 

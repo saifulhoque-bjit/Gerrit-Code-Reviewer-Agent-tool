@@ -19,6 +19,9 @@ diff_cap_chars = 8000
 strategy = "hermes"
 # Incremental: skip files unchanged since the last reviewed patchset.
 incremental = true
+# Rule tree: _base/ (always), _lang/ (by extension), <project-slug>/ (overrides).
+# Relative paths resolve from the repo root, not the process working dir.
+rules_dir = "rules"
 
 [post]
 # Auto-vote Code-Review when posting (error → -1, else 0). Off by default —

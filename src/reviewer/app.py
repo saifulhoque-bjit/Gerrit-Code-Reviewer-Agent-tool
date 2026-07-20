@@ -21,6 +21,7 @@ from .db import DB_PATH, connect, init_db
 from .engine import post_to_gerrit, run_review
 from .events import EventBus
 from .gerrit import GerritClient
+from .rules import list_rule_files, read_rule_file, write_rule_file
 from .settings import Settings, basic_auth_header, get_settings
 from .store import (
     get_latest_review,
@@ -58,6 +59,10 @@ class PostRequest(BaseModel):
 
 class EditCommentRequest(BaseModel):
     comment: str
+
+
+class RuleContentRequest(BaseModel):
+    content: str
 
 
 def _session(request: Request) -> dict | None:
@@ -270,6 +275,31 @@ def create_app() -> FastAPI:
     @app.get("/rules/effectiveness", dependencies=[Depends(require_token)])
     def effectiveness_endpoint() -> dict:
         return {"effectiveness": rule_effectiveness(app.state.conn)}
+
+    @app.get("/rules", dependencies=[Depends(require_token)])
+    def list_rules_endpoint() -> dict:
+        """Browsable rule tree (base / lang / project tiers) for the Rules panel."""
+        rules_dir = settings.review.rules_path()
+        return {"rules_dir": str(rules_dir), "files": list_rule_files(rules_dir)}
+
+    @app.get("/rules/file", dependencies=[Depends(require_token)])
+    def read_rule_endpoint(path: str = Query(...)) -> dict:
+        """Return a single rule file's markdown for editing."""
+        try:
+            content = read_rule_file(settings.review.rules_path(), path)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "rule file not found") from exc
+        return {"path": path, "content": content}
+
+    @app.put("/rules/file", dependencies=[Depends(require_token)])
+    def write_rule_endpoint(body: RuleContentRequest, path: str = Query(...)) -> dict:
+        """Overwrite a rule file. Path is validated against traversal in rules.py."""
+        try:
+            return write_rule_file(settings.review.rules_path(), path, body.content)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.post("/hooks/gerrit", status_code=202)
     async def gerrit_webhook(request: Request,

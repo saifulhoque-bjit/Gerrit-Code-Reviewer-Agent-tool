@@ -35,6 +35,13 @@ class ReviewCfg(BaseModel):
     diff_cap_chars: int = 8000
     strategy: str = "hermes"
     incremental: bool = True
+    # Rule tree (base/lang/project tiers). Relative paths resolve from the repo
+    # root so reviews work regardless of the process's working directory.
+    rules_dir: str = "rules"
+
+    def rules_path(self) -> Path:
+        p = Path(self.rules_dir)
+        return p if p.is_absolute() else ROOT / p
 
 
 class PostCfg(BaseModel):

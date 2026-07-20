@@ -231,6 +231,43 @@
   .comment .posted-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--suggestion); }
   .comment textarea { width: 100%; box-sizing: border-box; margin-top: 8px; background: #0b0f15; color: var(--text); border: 1px solid var(--border-strong); border-radius: 7px; padding: 9px 11px; font: 13px var(--mono); resize: vertical; }
   .comment textarea:focus { outline: none; border-color: var(--accent); }
+
+  /* Rules + Analytics panels (Phase 5). */
+  .mono { font-family: var(--mono); font-size: .92em; color: var(--muted); }
+  .panel { margin: 0 0 30px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+  .panel[hidden] { display: none; }
+  .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  .panel-head h2 { margin: 0; font-size: 15px; }
+  .panel-close { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 5px 11px; cursor: pointer; font-size: 12px; font-weight: 600; }
+  .panel-close:hover { border-color: var(--border-strong); }
+  .panel-hint { color: var(--faint); font-size: 12px; margin: 0 0 14px; }
+
+  .rules-layout { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 16px; align-items: start; }
+  .rules-list { display: flex; flex-direction: column; gap: 3px; max-height: 460px; overflow-y: auto; }
+  .rules-tier { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin: 10px 0 3px; }
+  .rules-tier:first-child { margin-top: 0; }
+  .rule-item { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 6px 9px; border-radius: 7px; cursor: pointer; font-size: 12.5px; color: var(--muted); border: 1px solid transparent; }
+  .rule-item:hover { background: var(--surface-2); color: var(--text); }
+  .rule-item.active { background: var(--surface-2); color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
+  .rule-item .sz { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+  .rules-editor { display: flex; flex-direction: column; gap: 10px; min-height: 200px; }
+  .rules-editor .editor-head { display: flex; align-items: center; gap: 10px; }
+  .rules-editor .editor-head .path { flex: 1; font-family: var(--mono); font-size: 12.5px; color: var(--text); word-break: break-all; }
+  .rules-editor textarea { width: 100%; box-sizing: border-box; min-height: 340px; background: #0b0f15; color: var(--text); border: 1px solid var(--border-strong); border-radius: 8px; padding: 12px 14px; font: 12.5px var(--mono); line-height: 1.55; resize: vertical; }
+  .rules-editor textarea:focus { outline: none; border-color: var(--accent); }
+  .rules-editor .save-btn { background: linear-gradient(180deg, var(--accent), #4a86ef); border: 0; color: #fff; border-radius: 7px; padding: 7px 15px; cursor: pointer; font-size: 12px; font-weight: 600; }
+  .rules-editor .save-btn:hover { filter: brightness(1.08); }
+  .rules-editor .save-btn:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+  .rules-editor .save-state { font-size: 12px; color: var(--faint); }
+
+  .eff-grid { display: flex; flex-direction: column; gap: 10px; }
+  .eff-row { display: grid; grid-template-columns: 96px 1fr 130px; gap: 12px; align-items: center; }
+  .eff-row .eff-sev { font-size: 12px; font-weight: 700; text-transform: capitalize; }
+  .eff-bar { height: 18px; border-radius: 5px; background: var(--surface-2); overflow: hidden; display: flex; }
+  .eff-bar .useful { background: var(--suggestion); height: 100%; }
+  .eff-bar .dismissed { background: var(--error, #ef5350); height: 100%; }
+  .eff-nums { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; }
+  @media (max-width: 720px) { .rules-layout { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -248,8 +285,29 @@
   <div class="bar">
     <select id="project" aria-label="Gerrit project"><option value="">All projects</option></select>
     <button id="queue" class="secondary">Open changes</button>
+    <button id="rulesBtn" class="secondary">Rules</button>
+    <button id="analyticsBtn" class="secondary">Analytics</button>
   </div>
   <p class="hint">Reviews stream in live as each file finishes.</p>
+
+  <section class="panel" id="analyticsPanel" hidden>
+    <div class="panel-head"><h2>Rule effectiveness</h2>
+      <button class="panel-close" data-close="analyticsPanel">Close</button></div>
+    <p class="panel-hint">Useful vs dismissed feedback per severity — spot noisy rule tiers.</p>
+    <div id="analyticsBody"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section class="panel" id="rulesPanel" hidden>
+    <div class="panel-head"><h2>Review rules</h2>
+      <button class="panel-close" data-close="rulesPanel">Close</button></div>
+    <p class="panel-hint">Edit the rule tree the reviewer reads: <span class="mono">_base</span> (always), <span class="mono">_lang</span> (by extension), project overrides.</p>
+    <div class="rules-layout">
+      <div class="rules-list" id="rulesList"><div class="empty">Loading…</div></div>
+      <div class="rules-editor" id="rulesEditor">
+        <div class="empty">Pick a rule file to view or edit.</div>
+      </div>
+    </div>
+  </section>
 
   <section class="queue" id="queuePanel">
     <div class="queue-head"><h2>Open changes</h2><span class="meta" id="queueMeta">Loading…</span></div>
@@ -725,6 +783,127 @@ $("postSelected").addEventListener("click", async () => {
     updatePostBar();
   }
 });
+
+// ── Rules + Analytics panels (Phase 5) ────────────────────────────
+function togglePanel(id) {
+  const panel = $(id);
+  const showing = panel.hasAttribute("hidden");
+  // One panel at a time; both collapse the queue view while open.
+  for (const pid of ["rulesPanel", "analyticsPanel"]) $(pid).setAttribute("hidden", "");
+  if (showing) panel.removeAttribute("hidden");
+  return showing;
+}
+document.addEventListener("click", (e) => {
+  const closeBtn = e.target.closest("[data-close]");
+  if (closeBtn) $(closeBtn.dataset.close).setAttribute("hidden", "");
+});
+
+$("analyticsBtn").addEventListener("click", async () => {
+  if (!togglePanel("analyticsPanel")) return;
+  const body = $("analyticsBody");
+  body.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await fetch("/rules/effectiveness");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const rows = (await r.json()).effectiveness || [];
+    if (!rows.length) { body.innerHTML = '<div class="empty">No feedback yet. Mark comments Useful or Dismiss to build this.</div>'; return; }
+    body.innerHTML = '<div class="eff-grid">' + rows.map((row) => {
+      const total = row.total || 0, useful = row.useful || 0, dismissed = row.dismissed || 0;
+      const rated = useful + dismissed;
+      const uPct = rated ? (useful / rated * 100) : 0;
+      const dPct = rated ? (dismissed / rated * 100) : 0;
+      return `<div class="eff-row"><span class="eff-sev">${esc(row.severity || "—")}</span>` +
+        `<span class="eff-bar" title="${useful} useful · ${dismissed} dismissed">` +
+        `<span class="useful" style="width:${uPct}%"></span>` +
+        `<span class="dismissed" style="width:${dPct}%"></span></span>` +
+        `<span class="eff-nums">${useful}✓ ${dismissed}✗ · ${total} total</span></div>`;
+    }).join("") + "</div>";
+  } catch (err) {
+    body.innerHTML = `<div class="empty">Could not load analytics (${esc(String(err))}).</div>`;
+  }
+});
+
+let rulesActive = "";  // path of the rule file currently in the editor
+$("rulesBtn").addEventListener("click", async () => {
+  if (!togglePanel("rulesPanel")) return;
+  await loadRulesList();
+});
+
+async function loadRulesList() {
+  const list = $("rulesList");
+  list.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await fetch("/rules");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const files = (await r.json()).files || [];
+    if (!files.length) { list.innerHTML = '<div class="empty">No rule files found.</div>'; return; }
+    const tiers = new Map();
+    for (const f of files) { if (!tiers.has(f.tier)) tiers.set(f.tier, []); tiers.get(f.tier).push(f); }
+    let html = "";
+    for (const [tier, items] of tiers) {
+      html += `<div class="rules-tier">${esc(tier)}</div>`;
+      for (const f of items) {
+        const kb = (f.bytes / 1024).toFixed(1);
+        html += `<div class="rule-item${f.path === rulesActive ? " active" : ""}" data-rule="${escAttr(f.path)}">` +
+          `<span>${esc(f.name)}</span><span class="sz">${kb}K</span></div>`;
+      }
+    }
+    list.innerHTML = html;
+  } catch (err) {
+    list.innerHTML = `<div class="empty">Could not load rules (${esc(String(err))}).</div>`;
+  }
+}
+
+$("rulesList").addEventListener("click", (e) => {
+  const item = e.target.closest("[data-rule]");
+  if (item) openRuleFile(item.dataset.rule);
+});
+
+async function openRuleFile(path) {
+  rulesActive = path;
+  $("rulesList").querySelectorAll(".rule-item").forEach(
+    (el) => el.classList.toggle("active", el.dataset.rule === path));
+  const editor = $("rulesEditor");
+  editor.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await fetch(`/rules/file?path=${encodeURIComponent(path)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const content = (await r.json()).content || "";
+    editor.innerHTML =
+      `<div class="editor-head"><span class="path">${esc(path)}</span>` +
+      `<span class="save-state" id="ruleSaveState"></span>` +
+      `<button class="save-btn" id="ruleSave">Save</button></div>` +
+      `<textarea id="ruleText" spellcheck="false"></textarea>`;
+    $("ruleText").value = content;
+    $("ruleSave").addEventListener("click", () => saveRuleFile(path));
+  } catch (err) {
+    editor.innerHTML = `<div class="empty">Could not open ${esc(path)} (${esc(String(err))}).</div>`;
+  }
+}
+
+async function saveRuleFile(path) {
+  const btn = $("ruleSave"), state = $("ruleSaveState");
+  const content = $("ruleText").value;
+  btn.disabled = true; state.textContent = "Saving…";
+  try {
+    const r = await fetch(`/rules/file?path=${encodeURIComponent(path)}`, {
+      method: "PUT", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({content}),
+    });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      state.textContent = `Failed: ${data.detail || r.status}`;
+      return;
+    }
+    const meta = await r.json();
+    state.textContent = `Saved · ${(meta.bytes / 1024).toFixed(1)}K`;
+    loadRulesList();  // refresh sizes
+  } catch (err) {
+    state.textContent = `Failed: ${err}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 const inspectChange = new URLSearchParams(window.location.search).get("change");
 fetch("/auth/status").then((r) => r.json()).then((data) => {

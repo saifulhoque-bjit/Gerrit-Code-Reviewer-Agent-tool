@@ -40,6 +40,74 @@ def detect_lang_files(filenames: list[str]) -> set[str]:
     }
 
 
+# ── Rule management (Phase 5: browse + edit rule files from the UI) ──
+# Editable rule files are markdown only; anything else is treated as read-only
+# content we never let the API write.
+_EDITABLE_SUFFIXES = {".md"}
+
+
+def _safe_rule_file(rules_dir: Path, rel_path: str) -> Path:
+    """Resolve a caller-supplied relative path *inside* rules_dir or raise.
+
+    Guards against path traversal ('../', absolute paths, symlink escapes):
+    the resolved file must sit under the resolved rules_dir and be a .md file.
+    """
+    if not rel_path or rel_path.strip() != rel_path:
+        raise ValueError("rule path is required")
+    candidate = (rules_dir / rel_path).resolve()
+    root = rules_dir.resolve()
+    if root != candidate and root not in candidate.parents:
+        raise ValueError("rule path escapes the rules directory")
+    if candidate.suffix.lower() not in _EDITABLE_SUFFIXES:
+        raise ValueError("only .md rule files can be read or edited")
+    return candidate
+
+
+def list_rule_files(rules_dir: Path) -> list[dict]:
+    """Every .md rule file under rules_dir, grouped-friendly and sorted.
+
+    Each entry carries its tier (_base / _lang / <project>), POSIX-style
+    relative path, size and mtime — enough for a browsable rules panel.
+    """
+    root = rules_dir.resolve()
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for p in sorted(root.rglob("*.md")):
+        rel = p.relative_to(root)
+        tier = rel.parts[0] if len(rel.parts) > 1 else "_root"
+        stat = p.stat()
+        out.append({
+            "path": rel.as_posix(),
+            "name": p.name,
+            "tier": tier,
+            "bytes": stat.st_size,
+            "modified": int(stat.st_mtime),
+        })
+    return out
+
+
+def read_rule_file(rules_dir: Path, rel_path: str) -> str:
+    """Return a rule file's text. Raises ValueError on a bad path, FileNotFoundError if absent."""
+    path = _safe_rule_file(rules_dir, rel_path)
+    if not path.is_file():
+        raise FileNotFoundError(rel_path)
+    return path.read_text(encoding="utf-8")
+
+
+def write_rule_file(rules_dir: Path, rel_path: str, content: str) -> dict:
+    """Overwrite (or create) a rule file. Creates parent tier dirs as needed.
+
+    Returns the file's fresh metadata. Raises ValueError on a bad path.
+    """
+    path = _safe_rule_file(rules_dir, rel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    stat = path.stat()
+    return {"path": path.relative_to(rules_dir.resolve()).as_posix(),
+            "bytes": stat.st_size, "modified": int(stat.st_mtime)}
+
+
 def resolve_rule_paths(
     rules_dir: Path, filenames: list[str], slug: str = ""
 ) -> list[Path]:
@@ -83,4 +151,18 @@ if __name__ == "__main__":
         out = resolve_rule_paths(rd, ["x.py"], "proj")
         names = [p.name for p in out]
         assert names == ["default.md", "python.md", "conv.md"], names
+
+        # Management helpers: list, read, write, and traversal guard.
+        listed = {e["path"] for e in list_rule_files(rd)}
+        assert listed == {"_base/default.md", "_lang/python.md", "proj/conv.md"}, listed
+        assert read_rule_file(rd, "_base/default.md") == "base"
+        meta = write_rule_file(rd, "_base/default.md", "updated base")
+        assert meta["path"] == "_base/default.md"
+        assert read_rule_file(rd, "_base/default.md") == "updated base"
+        for bad in ("../escape.md", "/etc/passwd", "_base/x.txt", ""):
+            try:
+                _safe_rule_file(rd, bad)
+                raise SystemExit(f"FAIL: traversal not blocked for {bad!r}")
+            except ValueError:
+                pass
     print("rules.py self-check OK")
