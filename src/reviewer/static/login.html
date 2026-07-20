@@ -5,22 +5,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in · Gerrit Reviewer</title>
 <style>
-  :root { --bg:#0e1116; --surface:#161b22; --border:#2a313c; --text:#e6edf3; --muted:#8b949e; --accent:#4c8dff; --error:#f85149; }
+  :root { --bg:#0a0d12; --surface:#12171f; --surface-2:#1a212c; --border:#262e3a; --border-strong:#333d4d; --text:#e9eef5; --muted:#8592a3; --faint:#5b6675; --accent:#5b9bff; --accent-2:#7c5bff; --error:#ff6b62; }
   * { box-sizing:border-box; }
-  body { min-height:100vh; margin:0; display:grid; place-items:center; background:var(--bg); color:var(--text); font:14px system-ui,-apple-system,"Segoe UI",sans-serif; }
-  .card { width:min(420px,calc(100vw - 32px)); padding:32px; background:var(--surface); border:1px solid var(--border); border-radius:12px; }
-  h1 { margin:0 0 6px; font-size:20px; } p { color:var(--muted); margin:0 0 28px; line-height:1.5; }
-  label { display:block; margin:16px 0 6px; font-weight:600; }
-  input { width:100%; padding:11px 12px; color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:8px; font:inherit; }
-  input:focus { outline:none; border-color:var(--accent); }
-  button { width:100%; margin-top:22px; padding:11px; border:0; border-radius:8px; cursor:pointer; background:var(--accent); color:#fff; font:600 14px inherit; }
-  button:disabled { opacity:.6; cursor:default; } .error { min-height:20px; margin-top:14px; color:var(--error); }
-  .hint { margin-top:24px; margin-bottom:0; font-size:12px; } a { color:#79a9ff; }
+  body { min-height:100vh; margin:0; display:grid; place-items:center; background:var(--bg);
+    background-image: radial-gradient(1000px 500px at 20% -5%, rgba(91,155,255,.1), transparent 60%), radial-gradient(800px 450px at 100% 10%, rgba(124,91,255,.07), transparent 55%);
+    color:var(--text); font:14px system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
+  .card { width:min(420px,calc(100vw - 32px)); padding:36px; background:var(--surface); border:1px solid var(--border); border-radius:16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 20px 50px -20px rgba(0,0,0,.7); }
+  .brand { display:flex; align-items:center; gap:11px; margin-bottom:22px; }
+  .logo { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--accent),var(--accent-2)); display:grid; place-items:center; font-size:18px; box-shadow:0 3px 14px -3px rgba(91,155,255,.6); }
+  h1 { margin:0; font-size:19px; letter-spacing:-.01em; } p { color:var(--muted); margin:0 0 22px; line-height:1.55; }
+  label { display:block; margin:16px 0 6px; font-weight:600; font-size:13px; }
+  input { width:100%; padding:12px 13px; color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:9px; font:inherit; transition:border-color .15s, box-shadow .15s; }
+  input::placeholder { color:var(--faint); }
+  input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(91,155,255,.15); }
+  button { width:100%; margin-top:24px; padding:12px; border:0; border-radius:9px; cursor:pointer; background:linear-gradient(180deg,var(--accent),#4a86ef); color:#fff; font:600 14px inherit; box-shadow:0 2px 12px -3px rgba(91,155,255,.6); transition:filter .15s, transform .05s; }
+  button:hover { filter:brightness(1.08); } button:active { transform:translateY(1px); }
+  button:disabled { opacity:.55; cursor:default; filter:none; box-shadow:none; } .error { min-height:20px; margin-top:14px; color:var(--error); font-size:13px; }
+  .hint { margin-top:24px; margin-bottom:0; font-size:12px; color:var(--faint); line-height:1.5; } a { color:#79a9ff; } strong { color:var(--muted); }
 </style>
 </head>
 <body>
 <main class="card">
-  <h1>Gerrit Reviewer</h1>
+  <div class="brand"><span class="logo" aria-hidden="true">◆</span><h1>Gerrit Reviewer</h1></div>
   <p>Sign in with your Gerrit HTTP credentials to start reviewing changes.</p>
   <form id="login-form">
     <label for="username">Username</label>
