@@ -469,7 +469,8 @@ changeQueue.addEventListener("click", (event) => {
   const change = changeQueue._changes?.[Number(button.dataset.reviewChange)];
   if (!change) return;
   const changeId = String(change.number || change.change_id);
-  window.open(`/?change=${encodeURIComponent(changeId)}`, "_blank", "noopener");
+  openWorkspace(changeId);
+  workspaceEl.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 workspaceFiles.addEventListener("click", (event) => {
   const button = event.target.closest("[data-workspace-file]");
