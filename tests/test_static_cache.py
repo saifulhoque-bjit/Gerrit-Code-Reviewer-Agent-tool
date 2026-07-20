@@ -26,3 +26,17 @@ def test_inspect_opens_a_dedicated_change_page():
     assert 'new URLSearchParams(window.location.search).get("change")' in dashboard
     assert 'document.body.classList.add("change-view")' in dashboard
     assert "body.change-view #queuePanel { display: none; }" in dashboard
+
+
+def test_diff_has_unified_and_side_by_side_views():
+    from reviewer.app import STATIC_DIR
+
+    dashboard = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # A Unified | Side-by-side toggle, like v3's setView('unified'|'split').
+    assert 'data-view="unified"' in dashboard
+    assert 'data-view="split"' in dashboard
+    # Both renderers exist and the dispatcher honors the selected mode.
+    assert "function renderUnified(diff)" in dashboard
+    assert "function renderSplit(diff)" in dashboard
+    assert 'diffMode === "split" ? renderSplit(diff) : renderUnified(diff)' in dashboard
