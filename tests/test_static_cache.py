@@ -12,14 +12,14 @@ def test_dashboard_html_disables_browser_caching():
     assert response.headers["cache-control"] == "no-cache, no-store, must-revalidate"
 
 
-def test_inspect_opens_a_change_specific_new_tab():
+def test_inspect_navigates_same_tab_to_the_change():
     from reviewer.app import STATIC_DIR
 
     dashboard = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-    # Inspect opens a real new tab. A features string (3rd arg) makes it a popup
-    # the browser blocks/auto-closes, so window.open must use only "_blank".
-    assert 'window.open(`/?change=${encodeURIComponent(changeId)}`, "_blank")' in dashboard
-    assert '"_blank", "noopener"' not in dashboard
-    # The new tab bootstraps the workspace from the ?change= param on load.
+    # Like v3's openChange: a plain same-tab navigation, not a scripted
+    # window.open (which gets popup-blocked / auto-closed).
+    assert "window.location.href = `/?change=${encodeURIComponent(changeId)}`" in dashboard
+    assert "window.open(" not in dashboard
+    # The reloaded SPA bootstraps the workspace from the ?change= param.
     assert 'new URLSearchParams(window.location.search).get("change")' in dashboard
