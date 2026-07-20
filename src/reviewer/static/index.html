@@ -210,6 +210,27 @@
   .comment pre.suggest { border-color: rgba(70,201,106,0.4); background: rgba(70,201,106,.04); }
 
   .empty { color: var(--faint); text-align: center; padding: 48px; font-size: 14px; }
+
+  /* Select / edit / post workflow (like v3's Select All + Post to Gerrit). */
+  .post-bar { display: none; align-items: center; gap: 10px; margin-bottom: 18px; padding: 11px 15px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+  .post-bar.show { display: flex; }
+  .post-bar .post-count { flex: 1; font-size: 13px; color: var(--muted); font-family: var(--mono); }
+  .post-bar button { border-radius: 7px; padding: 7px 13px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all .15s; }
+  .post-bar button.secondary { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); }
+  .post-bar button.secondary:hover { border-color: var(--border-strong); }
+  .post-bar button.primary { background: linear-gradient(180deg, var(--accent), #4a86ef); border: 0; color: #fff; box-shadow: 0 2px 10px -3px rgba(91,155,255,.6); }
+  .post-bar button.primary:hover { filter: brightness(1.08); }
+  .post-bar button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+
+  .comment .top .pick { width: 15px; height: 15px; margin-right: 2px; cursor: pointer; accent-color: var(--accent); flex: none; }
+  .comment.deselected { opacity: .5; }
+  .comment.posted { opacity: .6; border-left-color: var(--suggestion); }
+  .comment .top .grow { flex: 1; }
+  .comment .edit-btn { color: var(--muted); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); padding: 3px 10px; cursor: pointer; font-size: 11px; font-weight: 600; transition: all .15s; }
+  .comment .edit-btn:hover { color: var(--text); border-color: var(--border-strong); }
+  .comment .posted-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--suggestion); }
+  .comment textarea { width: 100%; box-sizing: border-box; margin-top: 8px; background: #0b0f15; color: var(--text); border: 1px solid var(--border-strong); border-radius: 7px; padding: 9px 11px; font: 13px var(--mono); resize: vertical; }
+  .comment textarea:focus { outline: none; border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -257,6 +278,13 @@
     <span class="meta" id="statusMeta"></span>
   </div>
 
+  <div class="post-bar" id="postBar">
+    <span class="post-count" id="postCount">0 selected</span>
+    <button id="selectAll" class="secondary">Select all</button>
+    <button id="deselectAll" class="secondary">Deselect all</button>
+    <button id="postSelected" class="primary">Post to Gerrit</button>
+  </div>
+
   <div id="results"></div>
 </main>
 
@@ -273,6 +301,8 @@ let byFile = new Map();
 let totalFiles = 0, doneFiles = 0;
 let workspace = { changeId: "", files: [], activeFile: "", diffs: new Map() };
 let diffMode = "unified";  // "unified" | "split", toggled in the workspace head
+let currentChange = "";       // change id backing the current results (for posting)
+const deselected = new Set(); // comment ids the reviewer unchecked (default = post all)
 
 function setStatus(state, text, meta = "") {
   statusEl.classList.add("show");
@@ -406,11 +436,13 @@ function renderSplit(diff) {
 
 async function openWorkspace(changeId) {
   workspace = { changeId, files: [], activeFile: "", diffs: new Map() };
+  currentChange = changeId; deselected.clear();
   $("change").value = changeId;
   $("workspaceTitle").textContent = `Change ${changeId}`;
   workspaceEl.classList.add("show");
   workspaceFiles.innerHTML = '<div class="diff-empty">Loading files…</div>';
   diffPane.innerHTML = '<div class="diff-empty">Choose a file to inspect its diff.</div>';
+  loadExistingReview(changeId);
   try {
     const response = await fetch(`/gerrit/changes/${encodeURIComponent(changeId)}/files`);
     if (!response.ok) throw new Error(`Could not load files (${response.status})`);
@@ -421,6 +453,24 @@ async function openWorkspace(changeId) {
   } catch (error) {
     workspaceFiles.innerHTML = `<div class="diff-empty">${esc(error.message)}</div>`;
   }
+}
+
+// Hydrate results from a prior review (if any) so posted/edited state survives
+// a reload into the change view — otherwise the panel starts empty.
+async function loadExistingReview(changeId) {
+  try {
+    const r = await fetch(`/review/${encodeURIComponent(changeId)}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data || data.status !== "done") return;
+    byFile = new Map();
+    for (const c of (data.comments || [])) {
+      if (!byFile.has(c.file)) byFile.set(c.file, []);
+      byFile.get(c.file).push(c);
+    }
+    render();
+    renderWorkspaceDiff();
+  } catch { /* no prior review — leave the panel empty */ }
 }
 
 async function loadWorkspaceDiff(filePath) {
@@ -443,6 +493,7 @@ async function loadWorkspaceDiff(filePath) {
 function render() {
   if (byFile.size === 0) {
     results.innerHTML = '<div class="empty">No comments yet.</div>';
+    updatePostBar();
     return;
   }
   let html = "";
@@ -452,10 +503,16 @@ function render() {
             `<span class="count">${comments.length} comment${comments.length > 1 ? "s" : ""}</span></div>`;
     for (const c of comments) {
       const sev = ["error", "warning", "suggestion"].includes(c.severity) ? c.severity : "suggestion";
-      html += `<div class="comment ${sev}"><div class="top">` +
-        `<span class="sev ${sev}">${sev}</span>` +
-        `<span class="loc">${esc(c.file)}:${c.line || 0}</span></div>` +
-        `<div class="body">${esc(c.comment)}</div>`;
+      const off = c.id && deselected.has(c.id);
+      const cls = `comment ${sev}${c.posted ? " posted" : off ? " deselected" : ""}`;
+      html += `<div class="${cls}" data-comment-card="${c.id || ""}"><div class="top">`;
+      // A checkbox to include/exclude this comment from the post (posted → locked).
+      if (c.id && !c.posted) html += `<input type="checkbox" class="pick" data-pick="${c.id}"${off ? "" : " checked"}>`;
+      html += `<span class="sev ${sev}">${sev}</span>` +
+        `<span class="loc grow">${esc(c.file)}:${c.line || 0}</span>`;
+      if (c.posted) html += `<span class="posted-tag">Posted</span>`;
+      else if (c.id) html += `<button class="edit-btn" data-edit="${c.id}">Edit</button>`;
+      html += `</div><div class="body" data-body="${c.id || ""}">${esc(c.comment)}</div>`;
       if (c.existing_code) html += `<pre>${esc(c.existing_code)}</pre>`;
       if (c.suggestion_code) html += `<pre class="suggest">${esc(c.suggestion_code)}</pre>`;
       if (c.id) html += `<div class="feedback" data-comment="${c.id}">` +
@@ -466,6 +523,22 @@ function render() {
     html += `</div>`;
   }
   results.innerHTML = html || '<div class="empty">No issues found. LGTM.</div>';
+  updatePostBar();
+}
+
+// The post bar shows once there are postable (un-posted, id-bearing) comments.
+function postableComments() {
+  return [...byFile.values()].flat().filter((c) => c.id && !c.posted);
+}
+function selectedIds() {
+  return postableComments().filter((c) => !deselected.has(c.id)).map((c) => c.id);
+}
+function updatePostBar() {
+  const postable = postableComments();
+  $("postBar").classList.toggle("show", postable.length > 0);
+  const n = selectedIds().length;
+  $("postCount").textContent = `${n} of ${postable.length} selected`;
+  $("postSelected").disabled = n === 0;
 }
 
 async function start() {
@@ -473,6 +546,7 @@ async function start() {
   if (!change) { $("change").focus(); return; }
 
   byFile = new Map(); doneFiles = 0; totalFiles = 0;
+  currentChange = change; deselected.clear();
   render();
   $("go").disabled = true;
   setStatus("live", "Connecting…");
@@ -577,11 +651,79 @@ $("history").addEventListener("click", async () => {
   setStatus("done", "Review history", `${(data.reviews || []).length} reviews`);
 });
 results.addEventListener("click", async (e) => {
-  const button = e.target.closest("[data-feedback]");
-  if (!button) return;
-  const id = button.parentElement.dataset.comment;
-  const r = await fetch(`/comments/${id}/feedback`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({feedback: button.dataset.feedback})});
-  if (r.ok) button.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("selected", b === button));
+  const feedbackBtn = e.target.closest("[data-feedback]");
+  if (feedbackBtn) {
+    const id = feedbackBtn.parentElement.dataset.comment;
+    const r = await fetch(`/comments/${id}/feedback`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({feedback: feedbackBtn.dataset.feedback})});
+    if (r.ok) feedbackBtn.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("selected", b === feedbackBtn));
+    return;
+  }
+  const editBtn = e.target.closest("[data-edit]");
+  if (editBtn) { toggleEdit(Number(editBtn.dataset.edit), editBtn); return; }
+});
+// Checkbox toggle: track which comments the reviewer excluded from the post.
+results.addEventListener("change", (e) => {
+  const pick = e.target.closest("[data-pick]");
+  if (!pick) return;
+  const id = Number(pick.dataset.pick);
+  if (pick.checked) deselected.delete(id); else deselected.add(id);
+  pick.closest(".comment").classList.toggle("deselected", !pick.checked);
+  updatePostBar();
+});
+
+const commentText = (id) => [...byFile.values()].flat().find((c) => c.id === id)?.comment || "";
+
+// Inline edit (like v3's editComment): Edit → textarea → Save persists via PATCH.
+async function toggleEdit(id, btn) {
+  const card = btn.closest(".comment");
+  const body = card.querySelector(`[data-body]`);
+  if (btn.dataset.editing === "1") {
+    const text = card.querySelector("textarea").value.trim();
+    if (!text) { card.querySelector("textarea").focus(); return; }
+    const r = await fetch(`/comments/${id}`, {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({comment: text})});
+    if (!r.ok) { setStatus("err", "Could not save edit", `HTTP ${r.status}`); return; }
+    for (const c of [...byFile.values()].flat()) if (c.id === id) c.comment = text;
+    btn.dataset.editing = "0"; btn.textContent = "Edit";
+    body.innerHTML = esc(text); body.style.display = "";
+    return;
+  }
+  btn.dataset.editing = "1"; btn.textContent = "Save";
+  body.style.display = "none";
+  const ta = document.createElement("textarea");
+  ta.rows = 4; ta.value = commentText(id);
+  body.after(ta); ta.focus();
+}
+
+function setAllSelected(on) {
+  for (const c of postableComments()) { if (on) deselected.delete(c.id); else deselected.add(c.id); }
+  render();
+}
+$("selectAll").addEventListener("click", () => setAllSelected(true));
+$("deselectAll").addEventListener("click", () => setAllSelected(false));
+$("postSelected").addEventListener("click", async () => {
+  const ids = selectedIds();
+  if (!ids.length || !currentChange) return;
+  const btn = $("postSelected");
+  btn.disabled = true; btn.textContent = "Posting…";
+  try {
+    const r = await fetch(`/review/${encodeURIComponent(currentChange)}/post`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({comment_ids: ids}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { setStatus("err", "Post failed", data.detail || `HTTP ${r.status}`); return; }
+    // Mark the posted comments so they lock and drop out of the selection.
+    const posted = new Set(ids);
+    for (const c of [...byFile.values()].flat()) if (posted.has(c.id)) c.posted = 1;
+    render();
+    const skipped = data.skipped ? `, ${data.skipped} already posted` : "";
+    setStatus("done", `Posted ${data.posted} comment${data.posted === 1 ? "" : "s"}`, `to Gerrit${skipped}`);
+  } catch (err) {
+    setStatus("err", "Post failed", String(err));
+  } finally {
+    btn.textContent = "Post to Gerrit";
+    updatePostBar();
+  }
 });
 
 const inspectChange = new URLSearchParams(window.location.search).get("change");

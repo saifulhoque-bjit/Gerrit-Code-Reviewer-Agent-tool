@@ -162,3 +162,83 @@ async def test_post_all_already_posted_is_noop():
             assert res["posted"] == 0 and g.posted_payload is None
         finally:
             conn.close()
+
+
+# ── selective posting (Phase 3: post only chosen comments) ────────
+@pytest.mark.asyncio
+async def test_post_only_selected_comment_ids():
+    from reviewer.store import get_review
+    with tempfile.TemporaryDirectory() as d:
+        conn = connect(Path(d) / "t.db")
+        try:
+            init_db(conn)
+            await _seed_review(conn, "910", 1, [
+                ReviewComment(file="a.py", line=3, severity="error", comment="x"),
+                ReviewComment(file="a.py", line=9, severity="warning", comment="y"),
+                ReviewComment(file="b.py", line=1, comment="z"),
+            ])
+            ids = [c["id"] for c in get_review(conn, "910", 1)["comments"]]
+            g = PostGerrit()
+            # Post only the first and third comment.
+            res = await post_to_gerrit(conn, get_settings(), g, "910", 1,
+                                       comment_ids=[ids[0], ids[2]])
+            assert res["posted"] == 2
+            files = g.posted_payload["robot"]
+            assert files["a.py"][0]["line"] == 3 and "b.py" in files
+            assert 9 not in [e.get("line") for e in files.get("a.py", [])]
+            # Only the posted two are flagged; the unselected one stays open.
+            after = {c["id"]: c["posted"] for c in get_review(conn, "910", 1)["comments"]}
+            assert after[ids[0]] == 1 and after[ids[2]] == 1 and after[ids[1]] == 0
+        finally:
+            conn.close()
+
+
+@pytest.mark.asyncio
+async def test_post_empty_selection_after_dedup_posts_nothing():
+    from reviewer.store import get_review
+    with tempfile.TemporaryDirectory() as d:
+        conn = connect(Path(d) / "t.db")
+        try:
+            init_db(conn)
+            await _seed_review(conn, "911", 1,
+                               [ReviewComment(file="a.py", line=3, comment="x")])
+            ids = [c["id"] for c in get_review(conn, "911", 1)["comments"]]
+            g = PostGerrit(already={"a.py": [{"line": 3, "message": "old"}]})
+            res = await post_to_gerrit(conn, get_settings(), g, "911", 1, comment_ids=ids)
+            assert res["posted"] == 0 and g.posted_payload is None
+        finally:
+            conn.close()
+
+
+def test_update_comment_text_persists_and_locks_after_post():
+    from reviewer.store import get_review, update_comment_text, mark_posted
+    from reviewer.models import TokenUsage
+    from reviewer.store import start_review, finish_review
+    with tempfile.TemporaryDirectory() as d:
+        conn = connect(Path(d) / "t.db")
+        try:
+            init_db(conn)
+            rid = start_review(conn, "912", 1)
+            finish_review(conn, rid, [ReviewComment(file="a.py", line=1, comment="orig")],
+                          TokenUsage(files_reviewed=1), status="done")
+            cid = get_review(conn, "912", 1)["comments"][0]["id"]
+            assert update_comment_text(conn, cid, "  edited text  ") is True
+            assert get_review(conn, "912", 1)["comments"][0]["comment"] == "edited text"
+            # Once posted, edits are refused (nothing to change).
+            mark_posted(conn, rid, [cid])
+            assert update_comment_text(conn, cid, "too late") is False
+        finally:
+            conn.close()
+
+
+def test_update_comment_text_rejects_empty():
+    from reviewer.store import update_comment_text
+    import pytest as _pytest
+    with tempfile.TemporaryDirectory() as d:
+        conn = connect(Path(d) / "t.db")
+        try:
+            init_db(conn)
+            with _pytest.raises(ValueError):
+                update_comment_text(conn, 1, "   ")
+        finally:
+            conn.close()

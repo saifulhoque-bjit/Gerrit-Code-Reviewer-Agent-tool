@@ -35,3 +35,39 @@ def test_post_503_without_gerrit_auth(monkeypatch):
         r = client.post("/review/12345/post", headers=HDR)
         # 503 (no gerrit auth) proves the route + token gate both passed.
         assert r.status_code == 503
+
+
+def test_post_selective_body_accepted(monkeypatch):
+    # A comment_ids body still reaches the gerrit-auth gate (503), proving the
+    # selective-post payload is parsed rather than rejected as malformed.
+    monkeypatch.delenv("GERRIT_AUTH", raising=False)
+    monkeypatch.delenv("GERRIT_USER", raising=False)
+    monkeypatch.delenv("GERRIT_HTTP_PASSWORD", raising=False)
+    from reviewer.settings import get_settings
+    get_settings.cache_clear()
+    with TestClient(create_app()) as client:
+        r = client.post("/review/12345/post", headers=HDR, json={"comment_ids": [1, 2]})
+        assert r.status_code == 503
+
+
+def test_edit_comment_route_registered():
+    app = create_app()
+    assert "/comments/{comment_id}" in {r.path for r in app.routes}
+
+
+def test_edit_comment_requires_token():
+    with TestClient(create_app()) as client:
+        r = client.patch("/comments/1", json={"comment": "x"})
+        assert r.status_code == 401
+
+
+def test_edit_comment_404_when_missing():
+    with TestClient(create_app()) as client:
+        r = client.patch("/comments/999999", headers=HDR, json={"comment": "new text"})
+        assert r.status_code == 404
+
+
+def test_edit_comment_422_on_empty():
+    with TestClient(create_app()) as client:
+        r = client.patch("/comments/1", headers=HDR, json={"comment": "   "})
+        assert r.status_code == 422

@@ -183,11 +183,14 @@ async def post_to_gerrit(
     gerrit: GerritPoster,
     change_id: str,
     patchset: int,
+    comment_ids: list[int] | None = None,
 ) -> dict:
     """Post a stored review's comments to Gerrit as robot comments.
 
-    Dedups against comments already posted to the change (re-posting is a
-    no-op on those), attaches fix suggestions, and optionally auto-votes.
+    When `comment_ids` is given, only those comments are posted (selective
+    posting from the UI); otherwise the whole review is posted. Dedups against
+    comments already posted to the change (re-posting is a no-op on those),
+    attaches fix suggestions, and optionally auto-votes.
     """
     from .gerrit import build_robot_comments, posted_comment_keys, vote_label
     from .store import get_review, mark_posted
@@ -197,22 +200,31 @@ async def post_to_gerrit(
         return {"posted": 0, "error": "no stored review for that patchset"}
 
     review_id = stored["id"]
-    comments = [ReviewComment(**{k: c[k] for k in
-                ("file", "line", "severity", "comment", "existing_code", "suggestion_code")})
-                for c in stored["comments"]]
+    rows = stored["comments"]
+    if comment_ids is not None:
+        wanted = set(comment_ids)
+        rows = [c for c in rows if c["id"] in wanted]
+        if not rows:
+            return {"posted": 0, "error": "none of the selected comments exist"}
+
+    # Keep each comment's db id alongside its ReviewComment so we can mark
+    # exactly what was posted (selective posting must not flag the rest).
+    fields = ("file", "line", "severity", "comment", "existing_code", "suggestion_code")
+    pairs = [(c["id"], ReviewComment(**{k: c[k] for k in fields})) for c in rows]
 
     # Dedup against what Gerrit already has (avoids v3's double-post bug).
     existing = posted_comment_keys(await gerrit.list_robot_comments(change_id))
-    fresh = [c for c in comments if (c.file, c.line) not in existing]
+    fresh = [(cid, c) for cid, c in pairs if (c.file, c.line) not in existing]
     if not fresh:
-        return {"posted": 0, "skipped": len(comments), "reason": "all already posted"}
+        return {"posted": 0, "skipped": len(pairs), "reason": "all already posted"}
 
+    fresh_comments = [c for _, c in fresh]
     run_id = f"{change_id}-ps{patchset}"
-    robot = build_robot_comments(fresh, run_id)
-    labels = vote_label(fresh, settings.post.auto_vote, settings.post.vote_label)
+    robot = build_robot_comments(fresh_comments, run_id)
+    labels = vote_label(fresh_comments, settings.post.auto_vote, settings.post.vote_label)
     message = f"Hermes AI review: {len(fresh)} comment(s)"
 
     status = await gerrit.post_review(change_id, robot, message, labels or None)
-    mark_posted(conn, review_id)
-    return {"posted": len(fresh), "skipped": len(comments) - len(fresh),
+    mark_posted(conn, review_id, [cid for cid, _ in fresh])
+    return {"posted": len(fresh), "skipped": len(pairs) - len(fresh),
             "http_status": status, "labels": labels}

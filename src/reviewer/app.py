@@ -25,6 +25,7 @@ from .settings import Settings, basic_auth_header, get_settings
 from .store import (
     get_latest_review,
     review_history,
+    update_comment_text,
     rule_effectiveness,
     set_feedback,
 )
@@ -48,6 +49,15 @@ class DashboardStaticFiles(StaticFiles):
 class LoginRequest(BaseModel):
     username: str
     http_password: str
+
+
+class PostRequest(BaseModel):
+    # None → post the whole review; a list → post only those comment ids.
+    comment_ids: list[int] | None = None
+
+
+class EditCommentRequest(BaseModel):
+    comment: str
 
 
 def _session(request: Request) -> dict | None:
@@ -280,20 +290,37 @@ def create_app() -> FastAPI:
         return {"status": "queued", "change_id": change_id}
 
     @app.post("/review/{change_id}/post")
-    async def post_review_endpoint(change_id: str, auth: str = Depends(require_token)) -> dict:
-        """Post the latest stored review's comments to Gerrit as robot comments."""
+    async def post_review_endpoint(
+        change_id: str, body: PostRequest = PostRequest(),
+        auth: str = Depends(require_token),
+    ) -> dict:
+        """Post the review's comments to Gerrit. Optionally a selected subset."""
         if not auth:
             raise HTTPException(503, "Gerrit auth not configured — sign in or set GERRIT_* in .env")
         stored = get_latest_review(app.state.conn, change_id)
         if stored is None or stored.get("status") != "done":
             raise HTTPException(409, "no completed review to post")
+        if body.comment_ids is not None and not body.comment_ids:
+            raise HTTPException(422, "comment_ids was empty — select at least one comment")
         async with GerritClient(
             settings.gerrit.url, auth,
             settings.gerrit.ca_bundle, settings.gerrit.timeout_seconds,
         ) as gerrit:
             return await post_to_gerrit(
                 app.state.conn, settings, gerrit, change_id, stored["patchset"],
+                body.comment_ids,
             )
+
+    @app.patch("/comments/{comment_id}", dependencies=[Depends(require_token)])
+    def edit_comment_endpoint(comment_id: int, body: EditCommentRequest) -> dict:
+        """Edit an un-posted comment's text before it's sent to Gerrit."""
+        try:
+            changed = update_comment_text(app.state.conn, comment_id, body.comment)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not changed:
+            raise HTTPException(404, "comment not found or already posted")
+        return {"comment_id": comment_id, "comment": body.comment.strip()}
 
     @app.get("/review/{change_id}/stream")
     async def stream_review(change_id: str, request: Request, token: str = ""):

@@ -40,3 +40,18 @@ def test_diff_has_unified_and_side_by_side_views():
     assert "function renderUnified(diff)" in dashboard
     assert "function renderSplit(diff)" in dashboard
     assert 'diffMode === "split" ? renderSplit(diff) : renderUnified(diff)' in dashboard
+
+
+def test_dashboard_has_select_edit_post_workflow():
+    from reviewer.app import STATIC_DIR
+
+    dashboard = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # Select / deselect / post controls (v3's Select All + Post to Gerrit).
+    assert 'id="selectAll"' in dashboard and 'id="deselectAll"' in dashboard
+    assert 'id="postSelected"' in dashboard and 'id="postBar"' in dashboard
+    # Per-comment checkbox + inline edit affordances.
+    assert 'data-pick=' in dashboard and 'data-edit=' in dashboard
+    # Posts only the selected ids, and edits persist over PATCH.
+    assert "comment_ids: ids" in dashboard
+    assert 'method: "PATCH"' in dashboard

@@ -105,9 +105,31 @@ def last_reviewed_patchset(conn: sqlite3.Connection, change_id: str, before: int
     return row["patchset"] if row else 0
 
 
-def mark_posted(conn: sqlite3.Connection, review_id: int) -> None:
-    conn.execute("UPDATE comment SET posted=1 WHERE review_id=?", (review_id,))
+def mark_posted(
+    conn: sqlite3.Connection, review_id: int, comment_ids: list[int] | None = None
+) -> None:
+    """Mark comments posted. All of the review's comments, or just `comment_ids`."""
+    if comment_ids is None:
+        conn.execute("UPDATE comment SET posted=1 WHERE review_id=?", (review_id,))
+    elif comment_ids:
+        marks = ",".join("?" * len(comment_ids))
+        conn.execute(
+            f"UPDATE comment SET posted=1 WHERE review_id=? AND id IN ({marks})",
+            (review_id, *comment_ids),
+        )
     conn.commit()
+
+
+def update_comment_text(conn: sqlite3.Connection, comment_id: int, comment: str) -> bool:
+    """Edit a comment's text before it's posted. Returns True if a row changed."""
+    text = comment.strip()
+    if not text:
+        raise ValueError("comment text must not be empty")
+    cur = conn.execute(
+        "UPDATE comment SET comment=? WHERE id=? AND posted=0", (text, comment_id)
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def review_history(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
