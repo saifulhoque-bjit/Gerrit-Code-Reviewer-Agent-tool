@@ -82,7 +82,7 @@ wheels = [
 [[package]]
 name = "gerrit-reviewer"
 version = "0.4.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
